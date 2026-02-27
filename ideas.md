@@ -7,181 +7,194 @@ Make this a **publishable, production-quality genetic algorithm library** — si
 - Rich documentation that makes it easy to pick the right mode
 - A test suite with real benchmark problems
 - Personal use: stock algo parameter optimization (the original use case)
+- Long-term: AI-readable logs + documentation that together enable an AI agent to
+  diagnose runs and auto-tune parameters (see PRINCIPLES.md)
 
 The core philosophy: **full control, no magic, no drift**.
-DEAP is ~8000 lines and hard to debug. This stays lean but capable.
 
 ---
 
-## Bug Fixes (do first)
+## Completed
 
-### Fix seed bug
-**File:** `genetic_engine.py:111`
-**Problem:** `random.seed(time.time())` ignores the user-provided seed entirely.
-**Fix:** `random.seed(seed)`
-**Why it matters:** Reproducibility is essential for debugging and benchmarking. Without it you can't compare runs or reproduce a good result.
+All items below have been implemented, tested, and documented.
 
-### ChoiceList crash on single-option list
-**Problem:** If `ChoiceList` has only 1 item, mutation tries to pick a *different* index from an empty list → crash.
-**Fix:** Guard with `if len(self.options) <= 1: return value`
-**Why it matters:** Silent crash in the middle of a long optimization run is painful.
+**Bug fixes**
+- [x] Fix seed bug (`random.seed(time.time())` → `random.seed(seed)`)
+- [x] ChoiceList crash on single-option list
+
+**Gene types**
+- [x] FloatRange with sigma-based Gaussian mutation
+- [x] IntRange with sigma-based scaled jumps (no longer ±1 only)
+- [x] ChoiceList categorical gene
+- [x] Per-gene mutation rate override on all gene types
+
+**Selection strategies**
+- [x] RouletteSelection (fitness-proportionate)
+- [x] TournamentSelection(k) (recommended default)
+- [x] RankSelection (rank-based weights)
+- [x] Pluggable SelectionStrategy base class
+
+**Crossover strategies**
+- [x] UniformCrossover (50/50 per gene)
+- [x] ArithmeticCrossover (blend for FloatRange)
+- [x] SinglePointCrossover (split index)
+- [x] Pluggable CrossoverStrategy base class
+
+**Termination & control**
+- [x] Early stopping with patience + min_delta
+- [x] Stagnation restart (inject fresh individuals after N stagnant gens)
+- [x] Adaptive mutation rate (auto-adjust on improvement/stagnation)
+- [x] Checkpoint / resume (save state to JSON, continue after crash)
+
+**Observability**
+- [x] Return generation history from run()
+- [x] Population diversity metric per generation (in history)
+- [x] Callback hook (on_generation)
+- [x] Structured JSON logging with AI-readable analysis section
+- [x] Convergence pattern classification in logs
+
+**Architecture**
+- [x] Minimize mode (mode='minimize', no negation needed)
+- [x] Reproducible seeding (seed applied at run() time, not __init__)
+- [x] Numpy seed (_seed_all covers both random and numpy.random)
+- [x] Multiprocessing (use_multiprocessing=True)
+
+**Population architectures**
+- [x] Island model (IslandModel: N populations + ring-topology migration)
+- [x] Multi-objective GA (MultiObjectiveGA: NSGA-II Pareto ranking)
+
+**Testing**
+- [x] 207 unit tests across 4 test files
+- [x] Property-based tests with hypothesis library
+- [x] Benchmark problems (sphere, Rastrigin) in tests
+
+**Documentation**
+- [x] README — entry point with decision guides and when-to-use advice
+- [x] features.md — full reference with tuning guide and troubleshooting checklist
+- [x] deap_comparison.md — detailed DEAP comparison with GitHub issue references
+- [x] PRINCIPLES.md — strategic vision and design principles
 
 ---
 
-## Selection Methods (interchangeable)
+## Remaining
 
-### Current: Fitness-proportionate (roulette wheel)
-Uses shifted scores as weights. Works but has known weaknesses: one superstar individual can dominate early, stalling diversity.
+### GitHub Actions CI
+Auto-run `pytest` on every push to main. Show a green badge in the README.
 
-### Add: Tournament selection
-Pick k random individuals, return the best. Repeat for each parent.
-**Why better:** No score normalization needed, works natively with negative fitness, selection pressure is tunable via k.
-**When to use:** Default recommendation — robust, simple, no edge cases.
-**Parameter:** `tournament_size` (default 3; higher = more elitism)
+**Why:** Makes the repo credible to potential users. Signals that the tests are
+actually run and passing, not just claimed to be.
 
-### Add: Rank-based selection
-Assign weights by rank position (1st place gets weight N, 2nd gets N-1, etc.) rather than raw fitness value.
-**Why better:** Prevents any one individual from dominating based on a huge fitness gap. Maintains steady selection pressure throughout.
-**When to use:** When fitness values vary wildly in magnitude across generations.
+**Implementation:**
+- `.github/workflows/test.yml` — run tests on Python 3.10, 3.11, 3.12
+- Add badge to README
 
-### Design: pluggable `SelectionStrategy` base class
+**Effort:** ~30 minutes. No code changes needed, just workflow config.
+
+---
+
+### CMA-ES Hybrid
+
+For FloatRange-only problems, offer CMA-ES (Covariance Matrix Adaptation Evolution Strategy)
+as an alternative optimization engine.
+
+**Why:** CMA-ES is theoretically optimal for continuous search spaces and often converges
+10–100× faster than a standard GA on problems with only float genes. For trading strategy
+threshold optimization (the original use case), it could be a significant win.
+
+**What it is:** CMA-ES maintains a multivariate Gaussian over the search space and adapts
+its covariance matrix each generation — essentially learning the shape of the fitness
+landscape. It automatically accounts for correlations between genes.
+
+**API sketch:**
 ```python
-class SelectionStrategy:
-    def select_parents(self, scored: list[tuple[dict, float]]) -> tuple[dict, dict]:
-        raise NotImplementedError
+from genetic_engine import CMAESOptimizer
+
+opt = CMAESOptimizer(
+    gene_builder     = genes,   # FloatRange genes only
+    fitness_function = fitness,
+    sigma0           = 0.3,     # initial step size
+    generations      = 100,
+    seed             = 42,
+    mode             = 'maximize',
+    log_path         = "cmaes_run.json",
+)
+best, score, history = opt.run()
 ```
-User can pass `selection=TournamentSelection(k=3)` or write their own.
+
+**Constraints:**
+- FloatRange genes only — CMA-ES doesn't handle categorical or integer genes natively
+- Falls back gracefully with a clear error if IntRange or ChoiceList genes are present
+- Fully log-compatible: same history structure, same log format, `type: "cmaes"`
+
+**Effort:** Medium. Can use pure Python implementation (no scipy dependency) or optionally
+wrap `cma` package if available.
 
 ---
 
-## Crossover Methods (interchangeable)
+### Run Comparison / Analysis Tool
 
-### Current: Uniform crossover
-Each gene independently 50/50 from either parent. Fast and simple.
+A utility to compare multiple JSON logs side by side — useful when tuning parameters
+across several runs.
 
-### Add: Arithmetic / blend crossover (for FloatRange)
-`child_gene = t * p1_gene + (1-t) * p2_gene` where t is random in [0,1].
-**Why better:** Produces offspring that interpolate between parents smoothly. Better for continuous optimization — avoids the "jump to one extreme" behavior of binary selection.
-**When to use:** When genes are floats and the fitness landscape is relatively smooth.
+**Why:** After running with different mutation rates or selection strategies, you want to
+see at a glance which run converged faster, reached a higher score, or maintained better
+diversity.
 
-### Add: Single-point crossover
-Pick a random split index; take all genes from p1 before it, p2 after.
-**Why better:** Preserves gene co-dependencies (genes that work well together stay together). Better when genes are ordered/correlated.
-**When to use:** When gene order is meaningful, e.g. a sequence of trading signal thresholds.
-
-### Design: pluggable `CrossoverStrategy`
+**API sketch:**
 ```python
-class CrossoverStrategy:
-    def crossover(self, p1: dict, p2: dict, gene_builder: GeneBuilder) -> dict:
-        raise NotImplementedError
+from genetic_engine import compare_runs
+
+compare_runs(["run_001.json", "run_002.json", "run_003.json"])
+# Prints a table: config differences, best scores, convergence gen, patterns
 ```
 
----
-
-## Mutation Improvements
-
-### IntRange: scale jump size to range width
-**Current problem:** ±1 step on an `IntRange(3, 300)` needs ~150 mutations on average to cross the range. Exploration is glacially slow.
-**Fix:** Jump = `max(1, int(range_width * mutation_sigma))`, clipped to bounds.
-**Why it matters:** Makes `IntRange` practically usable for wide integer ranges.
-
-### Adaptive mutation rate
-**Idea:** Automatically increase `mutation_rate` when the population stagnates (no improvement for N generations), decrease when converging well.
-**Why:** In real optimizations you want aggressive exploration early and fine-tuning late. Fixed rate is a compromise that's rarely ideal.
-**Implementation:** Track `generations_without_improvement`, scale mutation_rate up/down by a factor.
-
-### Per-gene mutation rate override
-**Idea:** Each `GeneSpec` can carry its own `mutation_rate` that overrides the global one.
-**Why:** Some genes are sensitive (small range, fine control) and some are coarse (mode switches). One-size mutation rate hurts both.
-
----
-
-## Termination & Control
-
-### Early stopping
-Stop when best score hasn't improved by more than `min_delta` for `patience` generations.
-**Why:** Saves compute time on problems that converge quickly. Essential for production use.
-**Parameters:** `patience=20`, `min_delta=1e-6`
-
-### Stagnation restart (population injection)
-When stuck for N generations, replace a fraction of the population with fresh random individuals.
-**Why:** Escapes local optima without throwing away the good individuals found so far.
-**Alternative to:** Restarting the whole run from scratch.
-
----
-
-## Observability & Debugging
-
-### Return generation history
-**Current:** Returns only `(best_individual, best_score)`.
-**Proposed:** Also return `history: list[dict]` with `gen`, `best_score`, `avg_score`, `diversity` per generation.
-**Why:** Without history you can't diagnose premature convergence, stagnation, or verify the algorithm is actually learning. Critical for tuning.
-
-### Population diversity metric
-Track average pairwise distance between individuals each generation.
-**Why:** When diversity collapses to near-zero you're stuck. Visible metric lets you decide to inject noise or restart.
-
-### Callback hook
+Or returns a dict for use in AI agents:
 ```python
-ga = GeneticAlgorithm(..., on_generation=my_callback)
-# my_callback(gen, best_ind, best_score, population)
+analysis = compare_runs(["run_001.json", "run_002.json"])
+# analysis['winner'], analysis['key_differences'], analysis['recommendations']
 ```
-**Why:** Lets users log to files, update a progress bar, checkpoint best individual, or implement custom early stopping — without modifying the engine.
+
+**Why this aligns with PRINCIPLES.md:** Directly serves the AI co-pilot goal. An agent
+running multiple tuning iterations would use this to understand which direction is working.
+
+**Effort:** Small-to-medium. Mostly JSON parsing and comparison logic.
 
 ---
 
-## Architecture & API
+### Formal Benchmark Suite
 
-### Seed numpy.random too
-If any fitness function uses numpy internally (very common in stock/ML use cases), `random.seed()` won't cover it.
-**Fix:** Also call `numpy.random.seed(seed)` if numpy is available.
+A small set of standard benchmark functions with known optima — so a user can verify
+the library is working correctly on their system before applying it to their real problem.
 
-### Checkpoint / resume
-Save best individual and population to disk at each generation (or every N).
-**Why:** Long runs (stock backtests over many tickers) can crash. Resume from last checkpoint instead of starting over.
+**Why:** Before trusting a GA on a 6-hour stock backtest, you want to know it actually
+works. Standard benchmarks give a ground truth to check against.
 
-### Minimize mode
-Add `mode='minimize'` parameter so users don't have to negate their fitness function.
-**Why:** Cognitive friction — most loss functions (MSE, drawdown, error) are minimized, not maximized. The negation trick is a paper cut for new users.
+**Functions:**
+- Sphere: `f(x) = Σxi²`, optimum at origin = 0
+- Rastrigin: multi-modal, optimum at origin = 0
+- Rosenbrock: narrow curved valley, optimum at (1,1,...) = 0
+- OneMax: binary genes, optimum = all ones
 
----
+**Format:** `examples/benchmarks.py` — runnable script that tests each benchmark and
+reports whether the library found the optimum within expected generations.
 
-## Testing
-
-### Unit tests per component
-- `FloatRange`: sample always in [low, high], mutate respects bounds, sigma=0 means no change
-- `IntRange`: sample always integer, mutate never goes out of bounds, ±jump stays valid
-- `ChoiceList`: sample always in options, mutate always picks different value (or same if only 1)
-- `GeneBuilder`: sample and mutate produce all named keys
-- `GeneticAlgorithm`: known-optimum problems converge (sphere function, Rastrigin, etc.)
-
-### Benchmark problems (standard GA test suite)
-- **Sphere function** — `f(x) = -sum(xi^2)`, optimum at origin. Simplest possible.
-- **Rastrigin function** — many local optima, tests ability to escape them
-- **Rosenbrock (banana) function** — narrow curved valley, tests fine-tuning
-- **OneMax** — binary gene version, classic combinatorial benchmark
-- **Travelling Salesman (small)** — tests discrete/permutation handling
-
-These are well-known, results are comparable to published algorithms including DEAP benchmarks.
-
-### Property-based tests
-Use `hypothesis` library to generate random gene configs and verify invariants always hold (individuals never escape bounds, population size never drifts, etc.)
+**Effort:** Small. Most of the benchmark logic already exists in the tests.
 
 ---
 
-## Bigger Ideas (future)
+### AI Agent Integration Example
 
-### Island model (parallel populations)
-Run multiple independent sub-populations in parallel (processes), occasionally migrate top individuals between islands.
-**Why:** Better exploration of the search space. Naturally parallel on multi-core. Standard technique for hard problems.
+A worked example demonstrating Phase 2 of the AI co-pilot vision: an agent reads a
+run log and the docs, and produces a concrete tuning recommendation.
 
-### Multi-objective support (Pareto / NSGA-II style)
-Fitness function returns a tuple `(profit, -drawdown)`. Use Pareto dominance ranking.
-**Why:** Stock optimization almost always has two competing objectives. Single scalar forces an arbitrary trade-off. Pareto gives you a frontier of solutions to choose from.
+**Why:** Makes the PRINCIPLES.md vision tangible and shows users how to use the library
+with an AI assistant. Also validates that the log + docs combination actually works
+for this purpose.
 
-### CMA-ES hybrid
-For FloatRange-only problems, offer CMA-ES (Covariance Matrix Adaptation) as an alternative engine — it's theoretically optimal for continuous spaces.
-**Why:** For continuous parameter search (like trading signal thresholds) it often converges 10–100x faster than standard GA.
+**Format:** `examples/ai_tuning.py` or a Jupyter notebook — runs a GA, saves the log,
+calls an AI API with the log + relevant docs section, prints the recommendation.
+
+**Effort:** Medium. Requires the Anthropic API but demonstrates the core vision.
 
 ---
 
@@ -190,27 +203,11 @@ For FloatRange-only problems, offer CMA-ES (Covariance Matrix Adaptation) as an 
 This engine was built to optimize trading strategy parameters (MA periods, signal thresholds, etc.) across stocks.
 
 Key needs for that use case:
-- **`IntRange` must work for window sizes** (currently too slow on wide ranges)
-- **`ChoiceList` for MA types** (SMA, EMA, WMA)
-- **Multiprocessing** is essential — each fitness call runs a full backtest
-- **History logging** — need to see convergence to know if enough generations were run
-- **Pareto** eventually — optimize Sharpe ratio vs. max drawdown simultaneously
-- **Checkpoint/resume** — backtests over 500+ tickers can take hours
-
----
-
-## Priority Order
-
-1. Fix seed bug
-2. Fix ChoiceList crash
-3. Early stopping + patience
-4. Return generation history
-5. Tournament selection
-6. IntRange large jumps
-7. Arithmetic crossover for floats
-8. Unit tests with benchmark problems
-9. Callback hook
-10. Adaptive mutation rate
-11. Checkpoint/resume
-12. Island model
-13. Multi-objective / Pareto
+- ✅ `IntRange` works for window sizes (sigma-based jumps)
+- ✅ `ChoiceList` for MA types (SMA, EMA, WMA)
+- ✅ Multiprocessing (each fitness call runs a full backtest)
+- ✅ History logging (convergence visible)
+- ✅ Pareto (optimize Sharpe ratio vs. max drawdown)
+- ✅ Checkpoint/resume (backtests over 500+ tickers can take hours)
+- ⬜ CMA-ES (would speed up threshold search significantly)
+- ⬜ AI agent integration (auto-tune across stocks)
