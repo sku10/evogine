@@ -383,6 +383,14 @@ See [deap_comparison.md](deap_comparison.md) for a full breakdown with GitHub is
 
 ---
 
+## Design Philosophy
+
+See [PRINCIPLES.md](PRINCIPLES.md) for the vision and design principles behind the library —
+including the strategic goal of making logs + documentation work together so an AI agent
+can read a run log, diagnose what went wrong, and suggest parameter changes automatically.
+
+---
+
 ## Full Documentation
 
 See [features.md](features.md) for:
