@@ -6,9 +6,10 @@ Complete parameter reference and examples for every feature.
 
 ## Gene Types
 
-### `FloatRange(low, high, sigma=0.1)`
+### `FloatRange(low, high, sigma=0.1, mutation_rate=None)`
 Continuous float gene. Mutation adds Gaussian noise scaled to the range width.
 `sigma` controls mutation aggressiveness: `0.1` = 10% of range width per step.
+`mutation_rate` is an optional per-gene override — see [Per-Gene Mutation Rate](#per-gene-mutation-rate).
 
 ```python
 from genetic_engine import FloatRange
@@ -18,8 +19,9 @@ genes.add("weight",    FloatRange(-5.0, 5.0, sigma=0.05)) # finer steps
 genes.add("factor",    FloatRange(0.0, 100.0, sigma=0.2)) # wider jumps
 ```
 
-### `IntRange(low, high, sigma=0.05)`
+### `IntRange(low, high, sigma=0.05, mutation_rate=None)`
 Integer gene. Jump size scales with range width: `jump = max(1, round(sigma * (high - low)))`.
+`mutation_rate` is an optional per-gene override.
 
 ```python
 from genetic_engine import IntRange
@@ -30,11 +32,11 @@ genes.add("window",    IntRange(0, 500, sigma=0.02)) # finer control on wide ran
 ```
 
 Default `sigma=0.05` (5% of range). Use smaller sigma for fine-tuning, larger for wide exploration.
-Previously this was hardcoded to ±1, which made wide integer ranges impractically slow to explore.
 
-### `ChoiceList(options)`
+### `ChoiceList(options, mutation_rate=None)`
 Categorical gene. Mutation always picks a *different* item from the list.
 Safe with single-item lists — returns the same value, no crash.
+`mutation_rate` is an optional per-gene override.
 
 ```python
 from genetic_engine import ChoiceList
@@ -66,6 +68,23 @@ Custom gene types: subclass `GeneSpec` and implement `sample()`, `mutate()`, `de
 
 ---
 
+## Per-Gene Mutation Rate
+
+Each gene can carry its own `mutation_rate` that overrides the global rate.
+
+```python
+genes = GeneBuilder()
+genes.add("coarse", FloatRange(-10.0, 10.0, mutation_rate=0.5))  # mutates aggressively
+genes.add("fine",   FloatRange(-10.0, 10.0, mutation_rate=0.02)) # rarely mutates
+genes.add("frozen", FloatRange(-10.0, 10.0, mutation_rate=0.0))  # never mutates
+```
+
+**When to use:** When some genes are sensitive (small range, fine control) and others
+are coarse (mode switches, wide ranges). One global rate is often a compromise that
+hurts both. Per-gene rates let you tune each dimension independently.
+
+---
+
 ## GeneticAlgorithm — Full Parameter Reference
 
 ```python
@@ -88,6 +107,13 @@ ga = GeneticAlgorithm(
     crossover           = None,          # CrossoverStrategy (default: UniformCrossover)
     on_generation       = None,          # callback fn(gen, best_score, avg_score, best_ind)
     mode                = 'maximize',    # 'maximize' or 'minimize'
+    adaptive_mutation   = False,         # auto-adjust mutation_rate each generation
+    adaptive_mutation_min = 0.01,        # lower bound for adaptive rate
+    adaptive_mutation_max = 0.5,         # upper bound for adaptive rate
+    checkpoint_path     = None,          # save checkpoint JSON (resumable)
+    checkpoint_every    = 1,             # save checkpoint every N generations
+    restart_after       = None,          # inject fresh individuals after N stagnant gens
+    restart_fraction    = 0.3,           # fraction of population to replace on restart
 )
 ```
 
@@ -95,6 +121,9 @@ ga = GeneticAlgorithm(
 
 ```python
 best_individual, best_score, history = ga.run()
+
+# Resume an interrupted run:
+best_individual, best_score, history = ga.run(resume_from="checkpoint.json")
 ```
 
 Returns:
@@ -234,6 +263,49 @@ ga = GeneticAlgorithm(
 
 ---
 
+## Stagnation Restart (Population Injection)
+
+When the population gets stuck, inject fresh random individuals to escape local optima.
+
+```python
+ga = GeneticAlgorithm(
+    ...,
+    restart_after    = 20,   # inject after 20 consecutive gens without improvement
+    restart_fraction = 0.3,  # replace 30% of population with fresh individuals
+)
+```
+
+- Elites (`elitism` top individuals) are always preserved.
+- Restarts fire every `restart_after` stagnant generations (i.e. at 20, 40, 60, ...).
+- Works alongside `patience` — early stopping still fires independently.
+- `history[gen]['restarted']` records when a restart occurred.
+
+**When to use:** Problems with many local optima (multi-modal fitness landscapes).
+Pairs well with `adaptive_mutation` for aggressive early exploration.
+
+---
+
+## Adaptive Mutation Rate
+
+Automatically adjusts `mutation_rate` each generation based on progress.
+
+```python
+ga = GeneticAlgorithm(
+    ...,
+    adaptive_mutation     = True,
+    mutation_rate         = 0.1,   # starting rate
+    adaptive_mutation_min = 0.01,  # never go below
+    adaptive_mutation_max = 0.5,   # never go above
+)
+```
+
+- On improvement: `rate *= 0.95` — fine-tune near a good solution
+- On stagnation: `rate *= 1.10` — explore harder when stuck
+- Rate is recorded per generation in `history[gen]['mutation_rate']`
+- Rate is included in the JSON log `config` section
+
+---
+
 ## Generation History
 
 Always returned as the third value from `run()`:
@@ -250,8 +322,16 @@ Each entry:
     'avg_score':                float,  # population average (real value)
     'improved':                 bool,   # did best_score improve vs. previous best?
     'gens_without_improvement': int,    # consecutive gens with no improvement
+    'mutation_rate':            float,  # current mutation rate (adaptive or fixed)
+    'diversity':                float,  # population diversity in [0.0, 1.0]
+    'restarted':                bool,   # was a stagnation restart injected this gen?
 }
 ```
+
+**`diversity`** is the average normalized spread across all genes:
+- FloatRange / IntRange: `(max_val - min_val) / (high - low)`
+- ChoiceList: fraction of options present in the population
+- Returns 0.0 when population is uniform, 1.0 when fully spread
 
 Plot convergence:
 ```python
@@ -259,8 +339,10 @@ import matplotlib.pyplot as plt
 gens  = [h['gen'] for h in history]
 bests = [h['best_score'] for h in history]
 avgs  = [h['avg_score'] for h in history]
+divs  = [h['diversity'] for h in history]
 plt.plot(gens, bests, label='best')
 plt.plot(gens, avgs,  label='avg')
+plt.plot(gens, divs,  label='diversity')
 plt.legend(); plt.show()
 ```
 
@@ -284,6 +366,55 @@ Live plot example — see `examples/live_plot.py`.
 
 ---
 
+## Checkpoint / Resume
+
+Save the run state to disk so an interrupted run can be continued.
+
+```python
+ga = GeneticAlgorithm(
+    ...,
+    checkpoint_path  = "checkpoint.json",  # save after each generation
+    checkpoint_every = 5,                  # or save every 5 gens
+)
+
+best, score, history = ga.run()
+```
+
+To resume after a crash or interruption:
+
+```python
+ga = GeneticAlgorithm(
+    gene_builder     = genes,     # same genes as original run
+    fitness_function = fitness,   # same fitness function
+    generations      = 200,       # total target (not remaining)
+    ...
+)
+
+best, score, history = ga.run(resume_from="checkpoint.json")
+```
+
+The returned `history` includes generations from the checkpoint **plus** the new
+generations — the full picture of the run from start to finish.
+
+Checkpoint JSON format:
+```json
+{
+  "gen": 42,
+  "population": [...],
+  "best_individual": {...},
+  "best_score_internal": -0.003,
+  "gens_without_improvement": 5,
+  "convergence_gen": 37,
+  "history": [...],
+  "mutation_rate": 0.08
+}
+```
+
+**When to use:** Any run that takes more than a few minutes. Essential for stock
+backtests across many tickers where a crash means hours of lost compute.
+
+---
+
 ## Structured JSON Logging
 
 ```python
@@ -291,14 +422,14 @@ ga = GeneticAlgorithm(..., log_path="logs/run_001.json")
 ```
 
 Log structure:
-- **`run`** — timestamp, elapsed seconds
+- **`run`** — timestamp, elapsed seconds, type (`single_objective`)
 - **`config`** — all parameters: population size, rates, mode, selection/crossover strategy names
 - **`genes`** — full gene definitions (type, ranges, options, sigma)
 - **`result`** — best individual, best score (real value), early_stopped, convergence_gen
 - **`analysis`** — pre-computed AI-readable observations:
   - `convergence_pattern` — one of: `converged_early`, `converged_midway`, `still_improving`, `no_progress_after_gen1`, `converged_at_end`, `too_short_to_assess`
   - `notes` — plain-English notes on what happened and what to adjust
-- **`history`** — full per-generation data
+- **`history`** — full per-generation data (including diversity, mutation_rate, restarted)
 
 AI agents (Claude, GPT, etc.) can read this log and explain whether the run was
 successful, whether parameters need tuning, and what to try next.
@@ -314,6 +445,7 @@ ga = GeneticAlgorithm(..., seed=42)
 Seed is applied at the start of `run()`, not at construction. This means:
 - Calling `ga.run()` twice produces identical results
 - Creating two instances with the same seed produces identical results regardless of construction order
+- `numpy.random` is also seeded if numpy is installed
 
 ---
 
@@ -327,6 +459,117 @@ Uses all available CPU cores via `multiprocessing.Pool`.
 
 **Requirements:** Fitness function must be defined at module level (not a lambda or
 nested function) to be picklable across processes.
+
+---
+
+## Island Model
+
+Multiple independent populations (islands) that evolve separately with periodic
+migration of top individuals between them. Better exploration through diversity.
+
+```python
+from genetic_engine import IslandModel, TournamentSelection, ArithmeticCrossover
+
+im = IslandModel(
+    gene_builder       = genes,
+    fitness_function   = fitness,
+    n_islands          = 4,          # number of sub-populations
+    island_population  = 50,         # individuals per island
+    generations        = 100,
+    migration_interval = 10,         # migrate every 10 gens
+    migration_size     = 2,          # top 2 from each island migrate
+    mutation_rate      = 0.1,
+    crossover_rate     = 0.6,
+    seed               = 42,
+    patience           = 30,
+    mode               = 'maximize',
+    log_path           = "island_run.json",
+    on_generation      = on_gen,
+    selection          = TournamentSelection(k=4),
+    crossover          = ArithmeticCrossover(),
+)
+
+best, score, history = im.run()
+```
+
+**Ring topology:** island 0 → island 1 → ... → island N-1 → island 0.
+Top `migration_size` individuals from each island are copied to the next.
+
+History entries include `island_bests: list[float]` — best score per island per generation.
+
+Island model log has `type: "island_model"` and includes `n_islands`, `migration_interval`,
+and `migration_size` in the config section.
+
+**When to use:**
+- Problems with many local optima (diversity helps escape them)
+- When you have multiple cores and a fast fitness function
+- When a single large population stagnates but smaller diverse ones might not
+
+---
+
+## Multi-Objective Optimization (Pareto / NSGA-II)
+
+Optimize multiple conflicting objectives simultaneously. Returns a **Pareto front** —
+a set of non-dominated solutions — instead of a single best individual.
+
+```python
+from genetic_engine import MultiObjectiveGA
+
+def fitness(ind: dict) -> list[float]:
+    sharpe    = run_backtest(ind).sharpe_ratio       # maximize
+    drawdown  = run_backtest(ind).max_drawdown       # minimize (pass as minimize)
+    return [sharpe, drawdown]
+
+ga = MultiObjectiveGA(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    n_objectives     = 2,
+    objectives       = ['maximize', 'minimize'],  # per-objective direction
+    population_size  = 100,
+    generations      = 50,
+    mutation_rate    = 0.1,
+    crossover_rate   = 0.6,
+    seed             = 42,
+    patience         = 20,
+    log_path         = "pareto_run.json",
+    on_generation    = on_gen,  # fn(gen, pareto_size, hv_proxy, pareto_front)
+)
+
+pareto_front, history = ga.run()
+```
+
+`pareto_front` is a list of non-dominated solutions:
+```python
+[
+    {'individual': {'fast_ma': 5, 'slow_ma': 50, ...}, 'scores': [1.8, 0.12]},
+    {'individual': {'fast_ma': 8, 'slow_ma': 80, ...}, 'scores': [1.5, 0.08]},
+    ...
+]
+```
+
+Scores are real values (un-negated). The caller chooses the preferred trade-off
+from the Pareto front (e.g., highest Sharpe with acceptable drawdown).
+
+**Pareto dominance:** solution A dominates B if A is no worse on all objectives
+and strictly better on at least one. The Pareto front contains all solutions
+that no other solution dominates.
+
+**History entries:**
+```python
+{
+    'gen':                      int,
+    'pareto_size':              int,    # number of non-dominated solutions
+    'hypervolume_proxy':        float,  # convergence indicator
+    'improved':                 bool,
+    'gens_without_improvement': int,
+}
+```
+
+**Callback signature for MultiObjectiveGA:**
+```python
+def on_gen(gen: int, pareto_size: int, hv_proxy: float, pareto_front: list):
+    print(f"Gen {gen}: {pareto_size} Pareto solutions")
+```
 
 ---
 
@@ -364,6 +607,29 @@ genes.add("learning_rate", LogRange(1e-5, 1e-1))
 
 ---
 
+## Property-Based Tests
+
+The test suite includes property-based tests using the `hypothesis` library.
+These verify invariants across hundreds of randomly generated inputs.
+
+```bash
+pip install hypothesis
+pytest tests/test_property.py
+```
+
+Invariants verified:
+- Gene values always within defined bounds after any number of mutations
+- Mutation with `rate=0` never changes the value
+- `GeneBuilder.sample()` always returns all gene keys
+- `GeneBuilder.mutate()` always returns all gene keys
+- GA history always has all required keys
+- Best score in history is monotonically non-decreasing
+- Gen counter is always sequential
+- Diversity metric always in [0.0, 1.0]
+- Best individual always has all gene keys
+
+---
+
 ## Complete Example
 
 ```python
@@ -397,6 +663,10 @@ ga = GeneticAlgorithm(
     crossover           = ArithmeticCrossover(),
     use_multiprocessing = True,
     log_path            = "backtest_run.json",
+    checkpoint_path     = "checkpoint.json",
+    checkpoint_every    = 10,
+    restart_after       = 25,
+    adaptive_mutation   = True,
 )
 
 best, score, history = ga.run()

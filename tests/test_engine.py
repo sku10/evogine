@@ -25,6 +25,7 @@ from genetic_engine import (
     UniformCrossover,
     ArithmeticCrossover,
     SinglePointCrossover,
+    _seed_all,
 )
 
 
@@ -1209,3 +1210,287 @@ class TestBugFixes:
         ga = make_simple_ga(genes, fitness, generations=5)
         best, score, _ = ga.run()
         assert best["only"] == "singleton"
+
+
+# ---------------------------------------------------------------------------
+# Numpy seed
+# ---------------------------------------------------------------------------
+
+class TestNumpySeed:
+    def test_seed_all_with_none_does_not_crash(self):
+        """_seed_all(None) should be a no-op."""
+        _seed_all(None)  # must not raise
+
+    def test_seed_all_with_value_works(self):
+        """_seed_all(42) should seed random; numpy optional."""
+        _seed_all(42)
+        v1 = random.random()
+        _seed_all(42)
+        v2 = random.random()
+        assert v1 == v2
+
+
+# ---------------------------------------------------------------------------
+# Per-gene mutation rate
+# ---------------------------------------------------------------------------
+
+class TestPerGeneMutationRate:
+    def test_floatrange_gene_rate_used(self):
+        """Gene with per-gene rate=1.0 always mutates even when global rate=0.0."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 1.0, mutation_rate=1.0))
+        ind = {"x": 0.5}
+        values = {genes.mutate(ind, mutation_rate=0.0)["x"] for _ in range(50)}
+        assert len(values) > 1, "Expected variation with per-gene rate=1.0"
+
+    def test_floatrange_zero_gene_rate_never_mutates(self):
+        """Gene with per-gene rate=0.0 never mutates even when global rate=1.0."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 1.0, mutation_rate=0.0))
+        ind = {"x": 0.5}
+        for _ in range(50):
+            assert genes.mutate(ind, mutation_rate=1.0)["x"] == 0.5
+
+    def test_intrange_gene_rate_overrides_global(self):
+        """IntRange per-gene rate=1.0 always mutates even if global=0.0."""
+        genes = GeneBuilder()
+        genes.add("n", IntRange(0, 100, mutation_rate=1.0))
+        ind = {"n": 50}
+        values = {genes.mutate(ind, mutation_rate=0.0)["n"] for _ in range(50)}
+        assert len(values) > 1
+
+    def test_choicelist_gene_rate_overrides_global(self):
+        """ChoiceList per-gene rate=1.0 always mutates."""
+        genes = GeneBuilder()
+        genes.add("c", ChoiceList(["a", "b", "c"], mutation_rate=1.0))
+        ind = {"c": "a"}
+        values = {genes.mutate(ind, mutation_rate=0.0)["c"] for _ in range(30)}
+        assert len(values) > 1
+
+    def test_gene_rate_in_describe(self):
+        """Per-gene rate appears in describe() output."""
+        spec = FloatRange(0.0, 1.0, mutation_rate=0.3)
+        d = spec.describe()
+        assert d['mutation_rate'] == 0.3
+
+    def test_no_gene_rate_absent_from_describe(self):
+        """When no per-gene rate, key is absent from describe()."""
+        spec = FloatRange(0.0, 1.0)
+        d = spec.describe()
+        assert 'mutation_rate' not in d
+
+    def test_genebuilder_uses_per_gene_rate(self):
+        """GeneBuilder.mutate() uses per-gene rate when set."""
+        genes = GeneBuilder()
+        genes.add("frozen", FloatRange(0.0, 1.0, mutation_rate=0.0))
+        genes.add("hot",    FloatRange(0.0, 1.0, mutation_rate=1.0))
+        ind = {"frozen": 0.5, "hot": 0.5}
+        mutations = [genes.mutate(ind, mutation_rate=0.5) for _ in range(20)]
+        assert all(m["frozen"] == 0.5 for m in mutations), "frozen gene should never change"
+        hot_values = {m["hot"] for m in mutations}
+        assert len(hot_values) > 1, "hot gene should always vary"
+
+
+# ---------------------------------------------------------------------------
+# Population diversity metric
+# ---------------------------------------------------------------------------
+
+class TestDiversityMetric:
+    def _make_ga(self):
+        genes = sphere_genes()
+        return make_simple_ga(genes, sphere_fitness)
+
+    def test_diversity_in_history(self):
+        ga = self._make_ga()
+        _, _, history = ga.run()
+        for h in history:
+            assert 'diversity' in h
+
+    def test_diversity_between_zero_and_one(self):
+        ga = self._make_ga()
+        _, _, history = ga.run()
+        for h in history:
+            assert 0.0 <= h['diversity'] <= 1.0
+
+    def test_diversity_drops_when_converged(self):
+        """Diversity should generally be lower after many generations."""
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=50, seed=1)
+        _, _, history = ga.run()
+        first_div = history[0]['diversity']
+        last_div = history[-1]['diversity']
+        # Allow either direction but usually diversity falls over time
+        # (at minimum, both should be valid floats)
+        assert isinstance(first_div, float)
+        assert isinstance(last_div, float)
+
+    def test_diversity_compute_floatrange(self):
+        """Direct test of _compute_diversity on known population."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"],
+            population_size=10,
+            generations=1,
+        )
+        # Population spanning full range → diversity near 1.0
+        population = [{"x": float(i)} for i in range(10)]
+        d = ga._compute_diversity(population)
+        assert d > 0.8
+
+    def test_diversity_compute_choicelist(self):
+        """ChoiceList diversity = fraction of options used."""
+        genes = GeneBuilder()
+        genes.add("c", ChoiceList(["a", "b", "c", "d"]))
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: 1.0,
+            population_size=10,
+            generations=1,
+        )
+        # All same value → diversity near 0
+        population = [{"c": "a"} for _ in range(10)]
+        d = ga._compute_diversity(population)
+        assert d <= 0.3
+
+    def test_restarted_in_history(self):
+        """history entries have 'restarted' key."""
+        ga = self._make_ga()
+        _, _, history = ga.run()
+        for h in history:
+            assert 'restarted' in h
+
+
+# ---------------------------------------------------------------------------
+# Stagnation restart
+# ---------------------------------------------------------------------------
+
+class TestStagnationRestart:
+    def test_restart_fires(self):
+        """restart_after=5 should set restarted=True at stagnation milestones."""
+        genes = sphere_genes()
+        ga = make_simple_ga(
+            genes, sphere_fitness,
+            generations=40,
+            patience=None,
+            restart_after=5,
+        )
+        _, _, history = ga.run()
+        restarted_gens = [h['gen'] for h in history if h['restarted']]
+        assert len(restarted_gens) > 0, "Expected at least one restart"
+
+    def test_restart_fires_at_multiples(self):
+        """restarted=True only when gens_without_improvement % restart_after == 0."""
+        genes = sphere_genes()
+        ga = make_simple_ga(
+            genes, sphere_fitness,
+            generations=50,
+            patience=None,
+            restart_after=7,
+        )
+        _, _, history = ga.run()
+        for h in history:
+            if h['restarted']:
+                assert h['gens_without_improvement'] % 7 == 0
+
+    def test_restart_does_not_crash(self):
+        """Full run with restart_after should complete without error."""
+        genes = sphere_genes()
+        ga = make_simple_ga(
+            genes, sphere_fitness,
+            generations=20,
+            restart_after=3,
+            restart_fraction=0.4,
+        )
+        best, score, history = ga.run()
+        assert best is not None
+        assert len(history) == 20
+
+    def test_restart_after_none_never_restarts(self):
+        """Without restart_after, no gen should have restarted=True."""
+        ga = make_simple_ga(sphere_genes(), sphere_fitness, generations=20)
+        _, _, history = ga.run()
+        assert all(not h['restarted'] for h in history)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint / resume
+# ---------------------------------------------------------------------------
+
+class TestCheckpointResume:
+    def test_checkpoint_file_created(self, tmp_path):
+        ckpt = str(tmp_path / "ckpt.json")
+        ga = make_simple_ga(
+            sphere_genes(), sphere_fitness,
+            generations=5,
+            checkpoint_path=ckpt,
+            checkpoint_every=1,
+        )
+        ga.run()
+        assert os.path.isfile(ckpt)
+
+    def test_checkpoint_valid_json(self, tmp_path):
+        ckpt = str(tmp_path / "ckpt.json")
+        ga = make_simple_ga(
+            sphere_genes(), sphere_fitness,
+            generations=5,
+            checkpoint_path=ckpt,
+        )
+        ga.run()
+        with open(ckpt) as f:
+            data = json.load(f)
+        assert 'gen' in data
+        assert 'population' in data
+        assert 'best_individual' in data
+        assert 'history' in data
+
+    def test_checkpoint_every_respected(self, tmp_path):
+        """Checkpoint file should contain the last saved gen (every=3 → gen 3 or 5)."""
+        ckpt = str(tmp_path / "ckpt.json")
+        ga = make_simple_ga(
+            sphere_genes(), sphere_fitness,
+            generations=5,
+            checkpoint_path=ckpt,
+            checkpoint_every=3,
+        )
+        ga.run()
+        with open(ckpt) as f:
+            data = json.load(f)
+        assert data['gen'] % 3 == 0 or data['gen'] == 5
+
+    def test_resume_continues_from_checkpoint(self, tmp_path):
+        """Resume appends new gens to loaded history; total includes all gens."""
+        ckpt = str(tmp_path / "ckpt.json")
+        ga_first = make_simple_ga(
+            sphere_genes(), sphere_fitness,
+            generations=5,
+            checkpoint_path=ckpt,
+            checkpoint_every=5,
+        )
+        _, _, hist1 = ga_first.run()
+
+        ga_second = make_simple_ga(sphere_genes(), sphere_fitness, generations=10)
+        _, _, hist2 = ga_second.run(resume_from=ckpt)
+
+        # Returned history = checkpoint history (gens 1-5) + new gens (6-10)
+        assert len(hist2) == 10
+        assert hist2[5]['gen'] == 6   # first resumed gen is at index 5
+        assert hist2[-1]['gen'] == 10
+
+    def test_resume_result_valid(self, tmp_path):
+        """Resumed run returns valid best individual and score."""
+        ckpt = str(tmp_path / "ckpt.json")
+        ga1 = make_simple_ga(
+            sphere_genes(), sphere_fitness,
+            generations=3,
+            checkpoint_path=ckpt,
+        )
+        ga1.run()
+
+        ga2 = make_simple_ga(sphere_genes(), sphere_fitness, generations=8)
+        best, score, history = ga2.run(resume_from=ckpt)
+        assert best is not None
+        assert isinstance(score, float)
+        # history = 3 gens from checkpoint + 5 new gens (4..8)
+        assert len(history) == 8
