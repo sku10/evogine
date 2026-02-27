@@ -848,6 +848,194 @@ def on_gen(gen: int, pareto_size: int, hv_proxy: float, pareto_front: list):
 
 ---
 
+## CMA-ES Optimizer
+
+CMA-ES (Covariance Matrix Adaptation Evolution Strategy) is a different kind of
+optimizer — not a genetic algorithm. Where a GA treats each generation independently,
+CMA-ES **learns the shape of the fitness landscape** and uses that knowledge to
+sample smarter each generation.
+
+The result: for problems with only float genes, CMA-ES often converges **10–100×
+faster** than a standard GA.
+
+### The idea in plain terms
+
+A GA with Gaussian mutation searches in a sphere: every direction is equally likely.
+CMA-ES starts the same way, but after a few generations it notices that moving in
+some directions tends to improve the score more than others. It tilts and stretches
+its sampling distribution to match — essentially learning that "northeast" is more
+promising than "northwest."
+
+The internal state is a **covariance matrix** that describes this learned ellipsoid.
+Each generation, CMA-ES:
+
+1. Samples candidate points from the current ellipsoid
+2. Evaluates their fitness
+3. Moves the mean toward the better half
+4. Shrinks or stretches the ellipsoid based on what worked
+
+Over time, the ellipsoid tracks the curvature of the fitness landscape and concentrates
+samples where improvements are most likely.
+
+### When to use CMA-ES
+
+| Situation | Recommendation |
+|---|---|
+| All genes are `FloatRange` | **Use CMA-ES** — designed exactly for this |
+| Genes are correlated (e.g. two MA periods that must move together) | **Use CMA-ES** — adapts to correlations automatically |
+| Fast convergence matters (large search space, expensive fitness) | **Use CMA-ES** — typically needs far fewer evaluations |
+| Fitness landscape is smooth and unimodal | **Use CMA-ES** |
+| You have `IntRange` or `ChoiceList` genes | **Use GeneticAlgorithm** — CMA-ES cannot handle discrete genes |
+| Fitness landscape is highly multimodal (many local optima) | **Use IslandModel** — CMA-ES can get trapped |
+| Mixed gene types and multiple objectives | **Use MultiObjectiveGA** |
+
+### Limitations (important)
+
+**FloatRange genes only.** CMA-ES works on continuous vectors. It has no concept of
+categories or integer steps. If you pass any `IntRange` or `ChoiceList` gene,
+`CMAESOptimizer` raises a `ValueError` immediately at construction — not at run time.
+
+**Minimum 2 genes.** The covariance matrix is meaningless for 1-dimensional problems.
+Use `GeneticAlgorithm` for single-gene problems.
+
+**Requires numpy.** The covariance matrix math uses linear algebra. Install with
+`pip install numpy`. The core library remains dependency-free; numpy is only needed
+when you call `.run()`.
+
+**Can get stuck in local optima.** CMA-ES follows gradients in the fitness landscape.
+If the landscape has multiple basins, it converges to whichever basin it enters first.
+Mitigation: run multiple times with different seeds and take the best result.
+
+### API
+
+```python
+from genetic_engine import CMAESOptimizer, GeneBuilder, FloatRange
+
+genes = GeneBuilder()
+genes.add("threshold", FloatRange(0.0, 1.0))
+genes.add("alpha",     FloatRange(0.01, 0.5))
+genes.add("beta",      FloatRange(0.01, 0.5))
+
+def fitness(ind):
+    return run_my_strategy(**ind)
+
+opt = CMAESOptimizer(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    sigma0           = 0.3,      # initial step size (fraction of gene range)
+    generations      = 200,      # maximum generations
+    patience         = 30,       # stop after 30 gens without improvement
+    mode             = 'maximize',
+    seed             = 42,
+    log_path         = "cmaes_run.json",
+)
+
+best, score, history = opt.run()
+# Same return shape as GeneticAlgorithm.run()
+```
+
+### Full parameter reference
+
+| Parameter | Default | Description |
+|---|---|---|
+| `gene_builder` | required | `GeneBuilder` with FloatRange genes only |
+| `fitness_function` | required | `dict → float`, same as GeneticAlgorithm |
+| `sigma0` | `0.3` | Initial step size as fraction of gene range. 0.1 = fine search; 0.5 = coarse search |
+| `generations` | `200` | Maximum number of generations |
+| `popsize` | auto | Population size λ. Default: `4 + floor(3·ln(n))`. Increase for multimodal problems |
+| `patience` | `None` | Stop after N gens without improvement. None = run all generations |
+| `min_delta` | `1e-9` | Minimum score improvement to reset patience counter |
+| `mode` | `'maximize'` | `'maximize'` or `'minimize'` |
+| `seed` | `None` | Random seed for reproducibility |
+| `log_path` | `None` | Path to write JSON log |
+| `tolx` | `1e-8` | Stop when step size × max eigenvalue < tolx (step too small to matter) |
+| `tolfun` | `1e-10` | Stop when score range over recent history is below this (flat landscape) |
+
+### Choosing sigma0
+
+`sigma0` is the initial step size, expressed as a fraction of the normalized gene
+range (each gene is internally mapped to [0, 1]).
+
+- `sigma0 = 0.1` — start with small steps, good when you already know roughly where
+  the optimum is (e.g. warm-starting near a previous solution)
+- `sigma0 = 0.3` — default; good for most problems with no prior knowledge
+- `sigma0 = 0.5` — start with large steps, good for wide landscapes where the optimum
+  could be anywhere; CMA-ES will shrink sigma as it converges
+
+If CMA-ES converges too quickly to a poor result: increase `sigma0`.
+If CMA-ES is slow to improve initially: decrease `sigma0`.
+
+### Understanding the history
+
+Each history entry contains:
+
+```python
+{
+    'gen':                      14,         # generation number (1-indexed)
+    'best_score':               1.742,      # best score seen so far (non-decreasing)
+    'avg_score':                1.508,      # mean score of this generation's samples
+    'sigma':                    0.024,      # current step size
+    'improved':                 True,       # did this generation set a new best?
+    'gens_without_improvement': 0,          # how many gens since last improvement
+    'stop_reason':              None,       # set on the final entry if stopping early
+}
+```
+
+**Reading the sigma curve:**
+- Sigma starts at `sigma0` and generally decreases as the algorithm converges
+- A sudden drop in sigma means the algorithm has found a promising region and is zooming in
+- If sigma stays large for many generations: the landscape may be flat or multimodal
+- Very small sigma (< 1e-6) + no improvement = truly converged (tolx will trigger)
+
+**Stopping reasons:**
+- `'patience'` — `patience` generations elapsed without improvement
+- `'tolx'` — step size became too small; the algorithm is fully converged
+- `'tolfun'` — score has been effectively flat for many generations
+- `None` — ran to the full generation limit
+
+### CMA-ES in the JSON log
+
+The log type is `"cmaes"`. The `config` section records all strategy parameters:
+
+```json
+{
+  "run":    { "type": "cmaes", "timestamp": "...", "elapsed_seconds": 1.23 },
+  "config": {
+    "sigma0": 0.3, "generations_max": 200, "generations_run": 67,
+    "mode": "maximize", "patience": 30,
+    "lambda": 10, "mu": 5, "mueff": 3.44,
+    "cc": 0.44, "cs": 0.35, "c1": 0.18, "cmu": 0.04, "damps": 1.36
+  },
+  "genes":  { "threshold": {"type": "FloatRange", "low": 0, "high": 1}, ... },
+  "result": {
+    "best_score": 1.84, "best_individual": { "threshold": 0.42, ... },
+    "sigma_final": 2.3e-07, "convergence_gen": 55, "stop_reason": "tolx"
+  },
+  "history": [...]
+}
+```
+
+The parameters `lambda`, `mu`, `mueff`, `cc`, `cs`, `c1`, `cmu`, `damps` are the
+internal CMA-ES strategy parameters computed automatically from the problem dimension.
+They are logged so that any run is fully reproducible from the log alone.
+
+### Comparing CMA-ES to GeneticAlgorithm
+
+Both return `(best_individual, best_score, history)`. The gene dict format is identical.
+The key differences:
+
+| | `GeneticAlgorithm` | `CMAESOptimizer` |
+|---|---|---|
+| Gene types | FloatRange, IntRange, ChoiceList | FloatRange only |
+| Convergence speed | Moderate | Fast (10–100× on float problems) |
+| Multimodal landscapes | Reasonable (IslandModel helps) | Vulnerable to local optima |
+| Dependencies | None (pure Python) | numpy required |
+| Population architecture | Explicit individuals | Implicit (sampled from ellipsoid) |
+| History `diversity` field | Yes | No (sigma serves the same role) |
+| Early stopping | patience + min_delta | patience + tolx + tolfun |
+
+---
+
 ## Parameter Tuning Guide
 
 If your run isn't working well, use this checklist.

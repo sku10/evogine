@@ -16,6 +16,10 @@ dev = [
     "pytest>=8.0",
     "pytest-cov",
     "hypothesis>=6.0",
+    "numpy>=1.24",
+]
+cmaes = [
+    "numpy>=1.24",
 ]
 
 [project.urls]

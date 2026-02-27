@@ -67,6 +67,7 @@ print(best)   # {'threshold': 0.42, 'lookback': 14, 'ma_type': 'ema'}
 | Situation | Use |
 |---|---|
 | One score to optimize (Sharpe, accuracy, MSE...) | `GeneticAlgorithm` |
+| All genes are `FloatRange` and speed matters | `CMAESOptimizer` |
 | Getting stuck in local optima; need more diversity | `IslandModel` |
 | Two competing goals (e.g. return vs. drawdown) | `MultiObjectiveGA` |
 
@@ -279,6 +280,39 @@ for solution in pareto_front:
 
 Returns the Pareto front — all solutions where improving one objective would require
 worsening another. You choose the trade-off that fits your risk tolerance.
+
+---
+
+## CMA-ES: Faster Convergence on Float Problems
+
+If all your genes are `FloatRange`, `CMAESOptimizer` is typically 10–100× faster than
+a standard GA because it **learns the shape of the fitness landscape** rather than
+searching blindly.
+
+```python
+from genetic_engine import CMAESOptimizer
+
+opt = CMAESOptimizer(
+    gene_builder     = genes,   # FloatRange genes only
+    fitness_function = fitness,
+    sigma0           = 0.3,     # initial step size (fraction of gene range)
+    generations      = 200,
+    patience         = 30,
+    mode             = 'maximize',
+    seed             = 42,
+    log_path         = "cmaes_run.json",
+)
+
+best, score, history = opt.run()
+# Same return shape as GeneticAlgorithm.run()
+```
+
+**Requires numpy** (`pip install numpy`). Raises `ValueError` at construction if any
+gene is not `FloatRange`. Returns the same `(best_individual, best_score, history)`
+tuple — the result is a plain dict, same as always.
+
+See [features.md](features.md#cma-es-optimizer) for the full parameter reference,
+sigma tuning guide, history format, and when to use CMA-ES vs GeneticAlgorithm.
 
 ---
 

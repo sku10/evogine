@@ -62,9 +62,10 @@ All items below have been implemented, tested, and documented.
 **Population architectures**
 - [x] Island model (IslandModel: N populations + ring-topology migration)
 - [x] Multi-objective GA (MultiObjectiveGA: NSGA-II Pareto ranking)
+- [x] CMA-ES hybrid (CMAESOptimizer: covariance matrix adaptation for FloatRange-only problems)
 
 **Testing**
-- [x] 207 unit tests across 4 test files
+- [x] 248 unit tests across 5 test files
 - [x] Property-based tests with hypothesis library
 - [x] Benchmark problems (sphere, Rastrigin) in tests
 
@@ -89,45 +90,6 @@ actually run and passing, not just claimed to be.
 - Add badge to README
 
 **Effort:** ~30 minutes. No code changes needed, just workflow config.
-
----
-
-### CMA-ES Hybrid
-
-For FloatRange-only problems, offer CMA-ES (Covariance Matrix Adaptation Evolution Strategy)
-as an alternative optimization engine.
-
-**Why:** CMA-ES is theoretically optimal for continuous search spaces and often converges
-10–100× faster than a standard GA on problems with only float genes. For trading strategy
-threshold optimization (the original use case), it could be a significant win.
-
-**What it is:** CMA-ES maintains a multivariate Gaussian over the search space and adapts
-its covariance matrix each generation — essentially learning the shape of the fitness
-landscape. It automatically accounts for correlations between genes.
-
-**API sketch:**
-```python
-from genetic_engine import CMAESOptimizer
-
-opt = CMAESOptimizer(
-    gene_builder     = genes,   # FloatRange genes only
-    fitness_function = fitness,
-    sigma0           = 0.3,     # initial step size
-    generations      = 100,
-    seed             = 42,
-    mode             = 'maximize',
-    log_path         = "cmaes_run.json",
-)
-best, score, history = opt.run()
-```
-
-**Constraints:**
-- FloatRange genes only — CMA-ES doesn't handle categorical or integer genes natively
-- Falls back gracefully with a clear error if IntRange or ChoiceList genes are present
-- Fully log-compatible: same history structure, same log format, `type: "cmaes"`
-
-**Effort:** Medium. Can use pure Python implementation (no scipy dependency) or optionally
-wrap `cma` package if available.
 
 ---
 
@@ -209,5 +171,5 @@ Key needs for that use case:
 - ✅ History logging (convergence visible)
 - ✅ Pareto (optimize Sharpe ratio vs. max drawdown)
 - ✅ Checkpoint/resume (backtests over 500+ tickers can take hours)
-- ⬜ CMA-ES (would speed up threshold search significantly)
+- ✅ CMA-ES (implemented — speeds up threshold/continuous parameter search significantly)
 - ⬜ AI agent integration (auto-tune across stocks)

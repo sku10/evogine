@@ -1,4 +1,5 @@
 import random
+import math
 import multiprocessing as mp
 import json
 import time
@@ -1346,6 +1347,350 @@ class MultiObjectiveGA:
             'result': {
                 'pareto_front_size': len(pareto_front),
                 'pareto_front': pareto_front,
+            },
+            'history': history,
+        }
+        with open(self.log_path, 'w', encoding='utf-8') as f:
+            json.dump(log, f, indent=2)
+        print(f"[LOG] Written to {self.log_path}")
+
+
+# ---------------------------------------------------------------------------
+# CMA-ES Optimizer
+# ---------------------------------------------------------------------------
+
+class CMAESOptimizer:
+    """
+    CMA-ES (Covariance Matrix Adaptation Evolution Strategy) optimizer.
+
+    For FloatRange-only problems. CMA-ES learns the shape of the fitness landscape
+    by maintaining and adapting a covariance matrix — effectively learning which
+    directions in gene space lead toward better solutions.
+
+    Why use CMA-ES over GeneticAlgorithm?
+    - 10-100x faster convergence on problems with only FloatRange genes
+    - Automatically adapts to correlations between genes
+    - Especially effective when the optimum lies in a curved or diagonal valley
+
+    When to use GeneticAlgorithm instead:
+    - You have IntRange or ChoiceList genes (CMA-ES does not support these)
+    - Your fitness landscape is highly multimodal (IslandModel helps more)
+
+    Args:
+        gene_builder:      GeneBuilder containing only FloatRange genes (min 2).
+        fitness_function:  Callable (dict -> float). Same interface as GeneticAlgorithm.
+        sigma0:            Initial step size, relative to gene range (default 0.3).
+                           Higher means more exploration initially. Valid range: 0.0-0.5.
+        generations:       Maximum number of generations (default 200).
+        popsize:           Population size lambda. Default: 4 + floor(3*ln(n)).
+                           Increase for multimodal landscapes.
+        patience:          Stop after this many generations without improvement.
+                           None means run to full generation limit.
+        min_delta:         Minimum improvement to reset the patience counter.
+        mode:              'maximize' (default) or 'minimize'.
+        seed:              Random seed for reproducibility.
+        log_path:          Path to write a JSON log (same format as GeneticAlgorithm logs).
+        tolx:              Stop when sigma * max(eigenvalues) < tolx (step size too small).
+        tolfun:            Stop when best score has not changed meaningfully in recent gens.
+
+    Returns from run():
+        (best_individual, best_score, history)
+        Same shape as GeneticAlgorithm.run(). history entries contain:
+            gen, best_score, avg_score, sigma, improved,
+            gens_without_improvement, stop_reason
+    """
+
+    def __init__(
+        self,
+        gene_builder: 'GeneBuilder',
+        fitness_function: Callable[[dict], float],
+        sigma0: float = 0.3,
+        generations: int = 200,
+        popsize: Optional[int] = None,
+        patience: Optional[int] = None,
+        min_delta: float = 1e-9,
+        mode: str = 'maximize',
+        seed: Optional[int] = None,
+        log_path: Optional[str] = None,
+        tolx: float = 1e-8,
+        tolfun: float = 1e-10,
+    ):
+        if mode not in ('maximize', 'minimize'):
+            raise ValueError("mode must be 'maximize' or 'minimize'")
+
+        for name, spec in gene_builder.specs.items():
+            if not isinstance(spec, FloatRange):
+                raise ValueError(
+                    f"CMAESOptimizer only supports FloatRange genes. "
+                    f"Gene '{name}' is {type(spec).__name__}. "
+                    f"Use GeneticAlgorithm for mixed gene types."
+                )
+
+        n = len(gene_builder.order)
+        if n < 2:
+            raise ValueError(
+                "CMAESOptimizer requires at least 2 genes. "
+                "For 1-dimensional problems use GeneticAlgorithm."
+            )
+
+        self.genes            = gene_builder
+        self.fitness_function = fitness_function
+        self.sigma0           = sigma0
+        self.generations      = generations
+        self.patience         = patience
+        self.min_delta        = min_delta
+        self.mode             = mode
+        self._sign            = 1.0 if mode == 'maximize' else -1.0
+        self.seed             = seed
+        self.log_path         = log_path
+        self.tolx             = tolx
+        self.tolfun           = tolfun
+
+        self._n   = n
+        self._lam = popsize if popsize is not None else (4 + int(3 * math.log(n)))
+        self._mu  = self._lam // 2
+
+    def _to_individual(self, x) -> dict:
+        """Convert a normalized [0,1]^n vector to a gene dict, clamped to gene ranges."""
+        ind = {}
+        for i, name in enumerate(self.genes.order):
+            spec = self.genes.specs[name]
+            v = max(0.0, min(1.0, float(x[i])))
+            ind[name] = spec.low + v * (spec.high - spec.low)
+        return ind
+
+    def _evaluate(self, x) -> float:
+        """Evaluate a normalized vector. Returns internal score (always-maximize sign)."""
+        return self._sign * self.fitness_function(self._to_individual(x))
+
+    def run(self) -> Tuple[dict, float, list]:
+        """
+        Run the CMA-ES optimization. Requires numpy.
+
+        Returns:
+            (best_individual, best_score, history)
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError(
+                "CMAESOptimizer requires numpy. Install it with: pip install numpy"
+            )
+
+        _seed_all(self.seed)
+
+        n   = self._n
+        lam = self._lam
+        mu  = self._mu
+
+        # --- Recombination weights (log-based, normalized to sum=1) ---
+        weights_raw = np.array(
+            [math.log(mu + 0.5) - math.log(i + 1) for i in range(mu)]
+        )
+        weights = weights_raw / weights_raw.sum()
+        mueff   = 1.0 / float((weights ** 2).sum())
+
+        # --- Strategy parameters (Hansen canonical defaults) ---
+        cc    = (4 + mueff / n) / (n + 4 + 2 * mueff / n)
+        cs    = (mueff + 2) / (n + mueff + 5)
+        c1    = 2 / ((n + 1.3) ** 2 + mueff)
+        cmu   = min(1 - c1, 2 * (mueff - 2 + 1 / mueff) / ((n + 2) ** 2 + mueff))
+        damps = 1 + 2 * max(0.0, math.sqrt((mueff - 1) / (n + 1)) - 1) + cs
+        chiN  = math.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n ** 2))
+
+        # --- CMA-ES state ---
+        m         = np.full(n, 0.5)    # mean in normalized [0,1]^n space
+        sigma     = self.sigma0        # global step size
+        pc        = np.zeros(n)        # evolution path for C
+        ps        = np.zeros(n)        # evolution path for sigma
+        B         = np.eye(n)          # eigenvectors of C
+        D         = np.ones(n)         # sqrt of eigenvalues of C
+        C         = np.eye(n)          # covariance matrix
+        invsqrtC  = np.eye(n)          # C^{-1/2}
+        eigeneval = 0                  # generation of last eigendecomposition
+
+        history                  = []
+        best_score_internal      = -math.inf
+        best_individual          = None
+        gen_best_ind             = None
+        gen_best_internal        = -math.inf
+        gens_without_improvement = 0
+        t_start                  = time.time()
+
+        for gen in range(1, self.generations + 1):
+
+            # --- Sample lambda candidates: x_k = m + sigma * B * (D * z_k) ---
+            arz = np.random.randn(lam, n)
+            arx = m + sigma * (B @ (D * arz).T).T   # shape (lam, n)
+
+            # --- Evaluate all candidates ---
+            fitvals    = np.array([self._evaluate(arx[k]) for k in range(lam)])
+            sorted_idx = np.argsort(fitvals)[::-1]   # best first
+
+            gen_best_internal = float(fitvals[sorted_idx[0]])
+            gen_best_ind      = self._to_individual(arx[sorted_idx[0]])
+            gen_best_real     = gen_best_internal * self._sign
+            gen_avg_real      = float(fitvals.mean()) * self._sign
+
+            improved = False
+            if gen_best_internal > best_score_internal + self.min_delta:
+                best_score_internal      = gen_best_internal
+                best_individual          = gen_best_ind
+                improved                 = True
+                gens_without_improvement = 0
+            else:
+                gens_without_improvement += 1
+
+            # best_score records the all-time best seen so far (non-decreasing),
+            # matching the GA's history convention.
+            running_best_real = best_score_internal * self._sign
+            history.append({
+                'gen':                      gen,
+                'best_score':               running_best_real,
+                'avg_score':                gen_avg_real,
+                'sigma':                    float(sigma),
+                'improved':                 improved,
+                'gens_without_improvement': gens_without_improvement,
+                'stop_reason':              None,
+            })
+
+            # --- CMA-ES update ---
+            m_old = m.copy()
+
+            # New mean: weighted centroid of top-mu candidates
+            m = sum(weights[i] * arx[sorted_idx[i]] for i in range(mu))
+
+            # Evolution path ps (controls step-size adaptation)
+            ps = (
+                (1 - cs) * ps
+                + math.sqrt(cs * (2 - cs) * mueff)
+                * (invsqrtC @ (m - m_old)) / sigma
+            )
+
+            # Heaviside indicator: suppress pc rank-one update when ps is too large
+            hsig = (
+                1.0
+                if (np.linalg.norm(ps)
+                    / math.sqrt(max(1e-300, 1 - (1 - cs) ** (2 * gen)))
+                    / chiN) < (1.4 + 2 / (n + 1))
+                else 0.0
+            )
+
+            # Evolution path pc (controls rank-one C update)
+            pc = (
+                (1 - cc) * pc
+                + hsig * math.sqrt(cc * (2 - cc) * mueff)
+                * (m - m_old) / sigma
+            )
+
+            # Deviations of selected points from old mean (rank-mu material)
+            artmp = (arx[sorted_idx[:mu]] - m_old) / sigma   # shape (mu, n)
+
+            # Full covariance matrix update: rank-one + rank-mu
+            C = (
+                (1 - c1 - cmu) * C
+                + c1 * (
+                    np.outer(pc, pc)
+                    + (1 - hsig) * cc * (2 - cc) * C
+                )
+                + cmu * sum(
+                    weights[i] * np.outer(artmp[i], artmp[i])
+                    for i in range(mu)
+                )
+            )
+
+            # Step-size adaptation (cumulative step-size control)
+            sigma *= math.exp(cs / damps * (np.linalg.norm(ps) / chiN - 1))
+
+            # Eigendecomposition — amortised over multiple generations
+            if gen - eigeneval > lam / (c1 + cmu) / n / 10:
+                eigeneval = gen
+                C         = np.triu(C) + np.triu(C, 1).T    # enforce symmetry
+                D2, B     = np.linalg.eigh(C)
+                D         = np.sqrt(np.maximum(D2, 1e-20))
+                invsqrtC  = B @ np.diag(1.0 / D) @ B.T
+
+            # --- Stopping conditions ---
+            stop_reason = None
+
+            if self.patience is not None and gens_without_improvement >= self.patience:
+                stop_reason = 'patience'
+
+            elif sigma * float(D.max()) < self.tolx:
+                stop_reason = 'tolx'
+
+            else:
+                win = min(len(history), 10 + 30 * n)
+                if win >= 10:
+                    recent = [h['best_score'] * self._sign for h in history[-win:]]
+                    if max(recent) - min(recent) < self.tolfun:
+                        stop_reason = 'tolfun'
+
+            if stop_reason:
+                history[-1]['stop_reason'] = stop_reason
+                break
+
+        elapsed = time.time() - t_start
+
+        # Fallback if fitness was constant throughout (best_individual never set)
+        if best_individual is None:
+            best_individual     = gen_best_ind
+            best_score_internal = gen_best_internal
+
+        best_score_real = best_score_internal * self._sign
+
+        if self.log_path:
+            self._write_log(
+                best_individual, best_score_real, history, elapsed,
+                lam=lam, mu=mu, mueff=mueff,
+                cc=cc, cs=cs, c1=c1, cmu=cmu, damps=damps,
+            )
+
+        return best_individual, best_score_real, history
+
+    def _write_log(
+        self,
+        best_individual: dict,
+        best_score: float,
+        history: list,
+        elapsed: float,
+        **cma_params,
+    ) -> None:
+        convergence_gen = next(
+            (h['gen'] for h in reversed(history) if h['improved']),
+            history[-1]['gen'],
+        )
+        log = {
+            'run': {
+                'timestamp':       datetime.now(timezone.utc).isoformat(),
+                'elapsed_seconds': round(elapsed, 3),
+                'type':            'cmaes',
+            },
+            'config': {
+                'sigma0':          self.sigma0,
+                'generations_max': self.generations,
+                'generations_run': len(history),
+                'patience':        self.patience,
+                'min_delta':       self.min_delta,
+                'mode':            self.mode,
+                'tolx':            self.tolx,
+                'tolfun':          self.tolfun,
+                'lambda':          cma_params['lam'],
+                'mu':              cma_params['mu'],
+                'mueff':           round(cma_params['mueff'], 4),
+                'cc':              round(cma_params['cc'], 6),
+                'cs':              round(cma_params['cs'], 6),
+                'c1':              round(cma_params['c1'], 6),
+                'cmu':             round(cma_params['cmu'], 6),
+                'damps':           round(cma_params['damps'], 6),
+            },
+            'genes': self.genes.describe(),
+            'result': {
+                'best_score':      best_score,
+                'best_individual': best_individual,
+                'sigma_final':     history[-1]['sigma'],
+                'convergence_gen': convergence_gen,
+                'stop_reason':     history[-1]['stop_reason'],
             },
             'history': history,
         }
