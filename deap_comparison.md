@@ -102,7 +102,7 @@ weren't necessary. A user responded:
 > *"Advising people to copy, paste and change is basically against what software development
 > was meant for. Keras supports this, and I don't see why DEAP shouldn't."*
 
-**This library:** `on_generation` callback is on the roadmap (see ideas.md).
+**This library:** `on_generation` callback is fully implemented on all optimizers (GeneticAlgorithm, IslandModel, MultiObjectiveGA, CMAESOptimizer).
 
 ---
 
@@ -181,14 +181,15 @@ slow response to ecosystem changes.
 
 ---
 
-## What DEAP Does Well (That This Library Doesn't Yet)
+## What DEAP Does Well (That This Library Doesn't)
 
 To be fair:
 - **Genetic Programming (GP)** — tree-based program evolution. Not in scope here.
-- **NSGA-II multi-objective** — mature implementation (with bugs, but present). Multi-objective
-  is on this library's roadmap.
+- **NSGA-II multi-objective** — mature implementation (with bugs, but present). This library
+  also provides full NSGA-II multi-objective optimization via `MultiObjectiveGA`.
 - **Wide operator library** — many crossover and selection operators available. This library
-  is growing its selection strategy options.
+  provides 3 selection strategies (Roulette, Tournament, Rank) and 3 crossover strategies
+  (Uniform, Arithmetic, SinglePoint), covering the most common use cases.
 - **Academic adoption** — widely cited in papers, many examples and tutorials exist.
 
 ---
@@ -204,7 +205,7 @@ To be fair:
 | Early stopping | No (DIY) | Built in |
 | Generation history | No | Built in |
 | Structured JSON logging | No | Built in |
-| Callback hooks | No (rejected) | Roadmap |
+| Callback hooks | No (rejected) | Built in |
 | Mixed gene types | No | Yes |
 | Setup boilerplate | ~30–50 lines | ~5 lines |
 | Active maintenance | Minimal | Active |

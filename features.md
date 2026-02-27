@@ -1,4 +1,4 @@
-# Genetic Engine — Complete Guide
+# evogine — Complete Guide
 
 ---
 
@@ -1097,6 +1097,7 @@ generate hundreds of random examples automatically:
     low=st.floats(-1000, 999),
     high=st.floats(-999, 1000),
     start=st.floats(-1000, 1000),
+    sigma=st.floats(0.01, 0.5, allow_nan=False, allow_infinity=False),
 )
 def test_floatrange_mutate_stays_in_bounds(low, high, sigma, start):
     assume(low < high)

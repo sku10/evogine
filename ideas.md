@@ -1,4 +1,4 @@
-# Genetic Engine — Ideas & Roadmap
+# evogine — Ideas & Roadmap
 
 ## Vision
 

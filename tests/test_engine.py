@@ -1,5 +1,5 @@
 """
-Tests for genetic_engine.py
+Tests for evogine.py
 
 Covers:
 - Gene types: FloatRange, IntRange, ChoiceList
@@ -1313,16 +1313,15 @@ class TestDiversityMetric:
             assert 0.0 <= h['diversity'] <= 1.0
 
     def test_diversity_drops_when_converged(self):
-        """Diversity should generally be lower after many generations."""
+        """Diversity should generally be lower after many generations of convergence."""
         genes = sphere_genes()
         ga = make_simple_ga(genes, sphere_fitness, generations=50, seed=1)
         _, _, history = ga.run()
         first_div = history[0]['diversity']
         last_div = history[-1]['diversity']
-        # Allow either direction but usually diversity falls over time
-        # (at minimum, both should be valid floats)
         assert isinstance(first_div, float)
         assert isinstance(last_div, float)
+        assert last_div <= first_div + 0.05  # diversity should not increase significantly
 
     def test_diversity_compute_floatrange(self):
         """Direct test of _compute_diversity on known population."""
@@ -1494,3 +1493,133 @@ class TestCheckpointResume:
         assert isinstance(score, float)
         # history = 3 gens from checkpoint + 5 new gens (4..8)
         assert len(history) == 8
+
+# ---------------------------------------------------------------------------
+# Input validation tests (#29)
+# ---------------------------------------------------------------------------
+
+class TestInputValidation:
+    def test_genebuilder_rejects_duplicate_names(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 1.0))
+        with pytest.raises(ValueError, match="already exists"):
+            genes.add("x", FloatRange(0.0, 1.0))
+
+    def test_choicelist_rejects_empty_options(self):
+        with pytest.raises(ValueError, match="at least one"):
+            ChoiceList([])
+
+    def test_choicelist_single_option_works(self):
+        c = ChoiceList(["only"])
+        assert c.sample() == "only"
+        assert c.mutate("only", 1.0) == "only"
+
+    def test_bad_mode_raises(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 1.0))
+        with pytest.raises(ValueError):
+            GeneticAlgorithm(
+                gene_builder=genes,
+                fitness_function=lambda i: 0.0,
+                mode="invalid",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Minimize mode combination tests (#28)
+# ---------------------------------------------------------------------------
+
+class TestMinimizeCombinations:
+    def test_minimize_with_early_stopping(self):
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            population_size=30,
+            generations=100,
+            patience=10,
+            mode="minimize",
+            seed=7,
+        )
+        best, score, history = ga.run()
+        assert score >= 0.0  # real value, not negated
+        assert len(history) < 100  # early stopped
+        # best_score non-increasing (minimize = lower is better)
+        for i in range(1, len(history)):
+            assert history[i]["best_score"] <= history[i - 1]["best_score"] + 1e-12
+
+    def test_minimize_with_adaptive_mutation(self):
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            population_size=30,
+            generations=30,
+            adaptive_mutation=True,
+            mode="minimize",
+            seed=3,
+        )
+        best, score, history = ga.run()
+        assert score >= 0.0
+        # mutation_rate should have changed
+        rates = [h["mutation_rate"] for h in history]
+        assert len(set(rates)) > 1
+
+    def test_minimize_with_stagnation_restart(self):
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            population_size=30,
+            generations=50,
+            restart_after=10,
+            restart_fraction=0.3,
+            mode="minimize",
+            seed=5,
+        )
+        _, _, history = ga.run()
+        # At least one history entry should exist
+        assert len(history) > 0
+        # All scores should be non-negative (real values)
+        for h in history:
+            assert h["best_score"] >= 0.0
+
+    def test_minimize_with_logging(self, tmp_path):
+        log_file = str(tmp_path / "min_run.json")
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            population_size=20,
+            generations=10,
+            mode="minimize",
+            seed=1,
+            log_path=log_file,
+        )
+        _, score, _ = ga.run()
+        with open(log_file) as f:
+            data = json.load(f)
+        assert data["config"]["mode"] == "minimize"
+        assert data["result"]["best_score"] >= 0.0
+        assert abs(data["result"]["best_score"] - score) < 1e-9
+
+# ---------------------------------------------------------------------------
+# Multiprocessing smoke test (#27)
+# ---------------------------------------------------------------------------
+
+class TestMultiprocessing:
+    def test_ga_multiprocessing_runs(self):
+        """Smoke test: GA with use_multiprocessing=True produces valid results."""
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=sphere_fitness,
+            population_size=20,
+            generations=5,
+            use_multiprocessing=True,
+            seed=42,
+        )
+        best, score, history = ga.run()
+        assert isinstance(best, dict)
+        assert isinstance(score, float)
+        assert len(history) == 5

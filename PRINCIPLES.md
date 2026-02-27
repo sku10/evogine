@@ -1,4 +1,4 @@
-# Genetic Engine — Design Principles
+# evogine — Design Principles
 
 This document captures the strategic vision and design principles that guide
 every decision in this library. It exists so that new features, API changes,

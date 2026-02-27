@@ -5,7 +5,7 @@ import json
 import time
 import os
 from datetime import datetime, timezone
-from typing import Callable, List, Tuple, Optional, Any
+from typing import Callable, Optional, Any
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,9 @@ class IntRange(GeneSpec):
 
 class ChoiceList(GeneSpec):
     def __init__(self, options: list, mutation_rate: Optional[float] = None):
-        self.options = options
+        if len(options) == 0:
+            raise ValueError("ChoiceList requires at least one option.")
+        self.options = list(options)
         self.gene_mutation_rate = mutation_rate
 
     def sample(self):
@@ -149,6 +151,8 @@ class GeneBuilder:
         self.order = []
 
     def add(self, name: str, spec: GeneSpec):
+        if name in self.specs:
+            raise ValueError(f"Gene '{name}' already exists in this GeneBuilder.")
         self.specs[name] = spec
         self.order.append(name)
 
@@ -176,11 +180,6 @@ class GeneBuilder:
 
     def describe(self) -> dict:
         return {name: self.specs[name].describe() for name in self.order}
-
-
-Individual = List[float]
-GeneRange = Tuple[float, float]
-Population = List[Individual]
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +553,9 @@ class GeneticAlgorithm:
                 )
 
             diversity = self._compute_diversity([ind for ind, _ in scored])
-            real_best = gen_best * self._sign
+            # best_score in history is the all-time running best (non-decreasing
+            # in maximize, non-increasing in minimize), consistent across all optimizers.
+            running_best_real = best_score * self._sign
             real_avg  = gen_avg  * self._sign
 
             # Stagnation restart check
@@ -566,7 +567,7 @@ class GeneticAlgorithm:
 
             history.append({
                 'gen': gen,
-                'best_score': real_best,
+                'best_score': running_best_real,
                 'avg_score': real_avg,
                 'improved': improved,
                 'gens_without_improvement': gens_without_improvement,
@@ -575,10 +576,10 @@ class GeneticAlgorithm:
                 'restarted': restarted,
             })
 
-            print(f"[GEN {gen:05}] Best: {real_best:.11f} | Avg: {real_avg:.11f} | Diversity: {diversity:.4f}")
+            print(f"[GEN {gen:05}] Best: {running_best_real:.11f} | Avg: {real_avg:.11f} | Diversity: {diversity:.4f}")
 
             if self._on_generation is not None:
-                self._on_generation(gen, real_best, real_avg, best_overall)
+                self._on_generation(gen, running_best_real, real_avg, best_overall)
 
             # Checkpoint
             if (
@@ -896,12 +897,13 @@ class IslandModel:
             else:
                 gens_without_improvement += 1
 
-            real_best = gen_best_sc * self._sign
+            # best_score = all-time running best, consistent across all optimizers
+            running_best_real = best_score * self._sign
             real_avg  = gen_avg_sc  * self._sign
 
             history.append({
                 'gen': gen,
-                'best_score': real_best,
+                'best_score': running_best_real,
                 'avg_score': real_avg,
                 'island_bests': island_bests,
                 'improved': improved,
@@ -909,12 +911,12 @@ class IslandModel:
             })
 
             print(
-                f"[GEN {gen:05}] Best: {real_best:.8f} | "
+                f"[GEN {gen:05}] Best: {running_best_real:.8f} | "
                 f"Avg: {real_avg:.8f} | Islands: {island_bests}"
             )
 
             if self._on_generation is not None:
-                self._on_generation(gen, real_best, real_avg, best_overall)
+                self._on_generation(gen, running_best_real, real_avg, best_overall)
 
             if self.patience is not None and gens_without_improvement >= self.patience:
                 print(f"[EARLY STOP] No improvement for {self.patience} generations.")
@@ -926,8 +928,16 @@ class IslandModel:
                     source = sorted(all_island_scored[i], key=lambda x: -x[1])
                     migrants = [ind.copy() for ind, _ in source[:self.migration_size]]
                     target_idx = (i + 1) % self.n_islands
-                    # Replace worst in target island
-                    populations[target_idx][-self.migration_size:] = migrants
+                    # Sort target island by fitness (worst last), replace worst
+                    target_scored = list(zip(
+                        populations[target_idx],
+                        [sc for _, sc in all_island_scored[target_idx]]
+                    ))
+                    target_scored.sort(key=lambda x: -x[1])
+                    populations[target_idx] = (
+                        [ind for ind, _ in target_scored[:-self.migration_size]]
+                        + migrants
+                    )
                 print(
                     f"[MIGRATION] Gen {gen}: "
                     f"{self.migration_size} migrants between {self.n_islands} islands"
@@ -1051,7 +1061,6 @@ class MultiObjectiveGA:
         seed: Optional[int] = None,
         patience: Optional[int] = None,
         min_delta: float = 1e-6,
-        selection: Optional[SelectionStrategy] = None,
         crossover: Optional[CrossoverStrategy] = None,
         log_path: Optional[str] = None,
         on_generation: Optional[Callable] = None,
@@ -1081,7 +1090,6 @@ class MultiObjectiveGA:
         self._seed = seed
         self.patience = patience
         self.min_delta = min_delta
-        self._selection = selection or TournamentSelection(k=3)
         self._crossover = crossover or UniformCrossover()
         self.log_path = log_path
         self._on_generation = on_generation
@@ -1198,6 +1206,24 @@ class MultiObjectiveGA:
 
         return [scored[i][0] for i in next_gen_indices]
 
+    def _tournament_crowding(
+        self,
+        scored: list[tuple[dict, list[float]]],
+        rank_map: dict[int, int],
+        dist_map: dict[int, float],
+    ) -> dict:
+        """Binary tournament: prefer lower rank, then higher crowding distance."""
+        i1, i2 = random.sample(range(len(scored)), min(2, len(scored)))
+        r1, r2 = rank_map.get(i1, 999), rank_map.get(i2, 999)
+        if r1 < r2:
+            return scored[i1][0]
+        elif r2 < r1:
+            return scored[i2][0]
+        elif dist_map.get(i1, 0) >= dist_map.get(i2, 0):
+            return scored[i1][0]
+        else:
+            return scored[i2][0]
+
     def run(self) -> tuple[list[dict], list[dict]]:
         """
         Run the multi-objective genetic algorithm.
@@ -1223,11 +1249,6 @@ class MultiObjectiveGA:
             scored = list(zip(population, score_vecs))
 
             fronts = self._non_dominated_sort(scored)
-
-            all_distances: dict[int, float] = {}
-            for front in fronts:
-                all_distances.update(self._crowding_distance(front, scored))
-
             front_0 = fronts[0] if fronts else []
             pareto_size = len(front_0)
 
@@ -1279,21 +1300,35 @@ class MultiObjectiveGA:
                 print(f"[EARLY STOP] No improvement for {self.patience} generations.")
                 break
 
-            # NSGA-II: select survivors, produce offspring
-            survivors = self._nsga2_select(scored)
+            # --- NSGA-II (mu+lambda): generate offspring, merge with parents, select ---
+            # 1. Generate offspring via crowding-tournament selection on parents
+            offspring = []
+            # Pre-compute ranks and crowding distances for tournament
+            rank_map: dict[int, int] = {}
+            dist_map: dict[int, float] = {}
+            for rank, front in enumerate(fronts):
+                distances = self._crowding_distance(front, scored)
+                for idx in front:
+                    rank_map[idx] = rank
+                    dist_map[idx] = distances[idx]
 
-            next_gen = []
-            while len(next_gen) < self.population_size:
+            while len(offspring) < self.population_size:
                 if random.random() < self.crossover_rate:
-                    p1 = random.choice(survivors)
-                    p2 = random.choice(survivors)
+                    p1 = self._tournament_crowding(scored, rank_map, dist_map)
+                    p2 = self._tournament_crowding(scored, rank_map, dist_map)
                     child = self._crossover.crossover(p1, p2, self.genes)
                 else:
-                    child = random.choice(survivors).copy()
+                    child = self._tournament_crowding(scored, rank_map, dist_map).copy()
                 child = self.genes.mutate(child, self.mutation_rate)
-                next_gen.append(child)
+                offspring.append(child)
 
-            population = next_gen
+            # 2. Merge parents + offspring (mu+lambda)
+            combined = [ind for ind, _ in scored] + offspring
+            combined_vecs = self._evaluate(combined)
+            combined_scored = list(zip(combined, combined_vecs))
+
+            # 3. Select next generation from combined pool
+            population = self._nsga2_select(combined_scored)
 
         # Final Pareto front
         final_vecs = self._evaluate(population)
@@ -1340,7 +1375,7 @@ class MultiObjectiveGA:
                 'crossover_rate': self.crossover_rate,
                 'patience': self.patience,
                 'min_delta': self.min_delta,
-                'selection': self._selection.describe(),
+                'use_multiprocessing': self.use_multiprocessing,
                 'crossover': self._crossover.describe(),
             },
             'genes': self.genes.describe(),
@@ -1414,6 +1449,7 @@ class CMAESOptimizer:
         log_path: Optional[str] = None,
         tolx: float = 1e-8,
         tolfun: float = 1e-10,
+        on_generation: Optional[Callable] = None,
     ):
         if mode not in ('maximize', 'minimize'):
             raise ValueError("mode must be 'maximize' or 'minimize'")
@@ -1439,12 +1475,13 @@ class CMAESOptimizer:
         self.generations      = generations
         self.patience         = patience
         self.min_delta        = min_delta
-        self.mode             = mode
+        self._mode            = mode
         self._sign            = 1.0 if mode == 'maximize' else -1.0
-        self.seed             = seed
+        self._seed            = seed
         self.log_path         = log_path
         self.tolx             = tolx
         self.tolfun           = tolfun
+        self._on_generation   = on_generation
 
         self._n   = n
         self._lam = popsize if popsize is not None else (4 + int(3 * math.log(n)))
@@ -1463,7 +1500,7 @@ class CMAESOptimizer:
         """Evaluate a normalized vector. Returns internal score (always-maximize sign)."""
         return self._sign * self.fitness_function(self._to_individual(x))
 
-    def run(self) -> Tuple[dict, float, list]:
+    def run(self) -> tuple[dict, float, list]:
         """
         Run the CMA-ES optimization. Requires numpy.
 
@@ -1477,7 +1514,7 @@ class CMAESOptimizer:
                 "CMAESOptimizer requires numpy. Install it with: pip install numpy"
             )
 
-        _seed_all(self.seed)
+        _seed_all(self._seed)
 
         n   = self._n
         lam = self._lam
@@ -1529,7 +1566,6 @@ class CMAESOptimizer:
 
             gen_best_internal = float(fitvals[sorted_idx[0]])
             gen_best_ind      = self._to_individual(arx[sorted_idx[0]])
-            gen_best_real     = gen_best_internal * self._sign
             gen_avg_real      = float(fitvals.mean()) * self._sign
 
             improved = False
@@ -1553,6 +1589,14 @@ class CMAESOptimizer:
                 'gens_without_improvement': gens_without_improvement,
                 'stop_reason':              None,
             })
+
+            print(
+                f"[GEN {gen:05}] Best: {running_best_real:.11f} | "
+                f"Avg: {gen_avg_real:.11f} | σ: {sigma:.6f}"
+            )
+
+            if self._on_generation is not None:
+                self._on_generation(gen, running_best_real, gen_avg_real, best_individual)
 
             # --- CMA-ES update ---
             m_old = m.copy()
@@ -1658,7 +1702,7 @@ class CMAESOptimizer:
     ) -> None:
         convergence_gen = next(
             (h['gen'] for h in reversed(history) if h['improved']),
-            history[-1]['gen'],
+            history[-1]['gen'] if history else 0,
         )
         log = {
             'run': {
@@ -1672,7 +1716,7 @@ class CMAESOptimizer:
                 'generations_run': len(history),
                 'patience':        self.patience,
                 'min_delta':       self.min_delta,
-                'mode':            self.mode,
+                'mode':            self._mode,
                 'tolx':            self.tolx,
                 'tolfun':          self.tolfun,
                 'lambda':          cma_params['lam'],
@@ -1688,9 +1732,9 @@ class CMAESOptimizer:
             'result': {
                 'best_score':      best_score,
                 'best_individual': best_individual,
-                'sigma_final':     history[-1]['sigma'],
+                'sigma_final':     history[-1]['sigma'] if history else self.sigma0,
                 'convergence_gen': convergence_gen,
-                'stop_reason':     history[-1]['stop_reason'],
+                'stop_reason':     history[-1]['stop_reason'] if history else None,
             },
             'history': history,
         }

@@ -461,3 +461,104 @@ class TestLogOutput:
         with open(log_file) as f:
             data = json.load(f)
         assert len(data["history"]) == len(history)
+
+
+# ---------------------------------------------------------------------------
+# CMA-ES tolfun isolation (#31)
+# ---------------------------------------------------------------------------
+
+class TestTolfunIsolation:
+    def test_tolfun_triggers_on_constant_fitness(self):
+        """tolfun should trigger when fitness is flat (no patience, no tolx)."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 1.0))
+        genes.add("y", FloatRange(0.0, 1.0))
+
+        opt = CMAESOptimizer(
+            gene_builder=genes,
+            fitness_function=lambda ind: 1.0,  # constant fitness
+            generations=500,
+            patience=None,  # disabled
+            tolx=0.0,       # disabled
+            tolfun=1e-10,   # only this active
+            seed=1,
+        )
+        _, _, history = opt.run()
+        # Should stop via tolfun before 500 gens
+        assert len(history) < 500
+        assert history[-1]["stop_reason"] == "tolfun"
+
+
+# ---------------------------------------------------------------------------
+# CMA-ES on_generation callback
+# ---------------------------------------------------------------------------
+
+class TestCMAESCallback:
+    def test_callback_fires(self):
+        records = []
+
+        def cb(gen, best, avg, best_ind):
+            records.append((gen, best, avg, best_ind))
+
+        opt = make_sphere_optimizer(generations=5, on_generation=cb)
+        opt.run()
+        assert len(records) == 5
+        assert records[0][0] == 1
+
+    def test_callback_receives_correct_types(self):
+        records = []
+
+        def cb(gen, best, avg, best_ind):
+            records.append((gen, best, avg, best_ind))
+
+        opt = make_sphere_optimizer(generations=3, on_generation=cb)
+        opt.run()
+        gen, best, avg, ind = records[-1]
+        assert isinstance(gen, int)
+        assert isinstance(best, float)
+        assert isinstance(avg, float)
+        assert ind is None or isinstance(ind, dict)
+
+
+# ---------------------------------------------------------------------------
+# CMA-ES minimize mode + logging combined
+# ---------------------------------------------------------------------------
+
+class TestCMAESMinimizeLogging:
+    def test_minimize_log_has_correct_mode(self, tmp_path):
+        log_file = str(tmp_path / "cmaes_min.json")
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(-5.0, 5.0))
+        genes.add("y", FloatRange(-5.0, 5.0))
+
+        opt = CMAESOptimizer(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            generations=30,
+            mode="minimize",
+            seed=1,
+            log_path=log_file,
+        )
+        _, score, history = opt.run()
+        assert score >= 0.0  # real value
+
+        with open(log_file) as f:
+            data = json.load(f)
+        assert data["config"]["mode"] == "minimize"
+        assert data["result"]["best_score"] >= 0.0
+
+    def test_minimize_best_score_non_increasing(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(-5.0, 5.0))
+        genes.add("y", FloatRange(-5.0, 5.0))
+
+        opt = CMAESOptimizer(
+            gene_builder=genes,
+            fitness_function=lambda ind: ind["x"] ** 2 + ind["y"] ** 2,
+            generations=20,
+            mode="minimize",
+            seed=2,
+        )
+        _, _, history = opt.run()
+        for i in range(1, len(history)):
+            assert history[i]["best_score"] <= history[i - 1]["best_score"] + 1e-12
