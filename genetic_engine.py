@@ -130,8 +130,7 @@ class GeneticAlgorithm:
         self.patience = patience
         self.min_delta = min_delta
         self.log_path = log_path
-        if seed is not None:
-            random.seed(seed)
+        self._seed = seed
 
     def create_individual(self) -> dict:
         return self.genes.sample()
@@ -169,6 +168,9 @@ class GeneticAlgorithm:
             history:         list of dicts per generation with keys:
                                gen, best_score, avg_score, improved, gens_without_improvement
         """
+        if self._seed is not None:
+            random.seed(self._seed)
+
         t_start = time.time()
         population = [self.create_individual() for _ in range(self.population_size)]
 
