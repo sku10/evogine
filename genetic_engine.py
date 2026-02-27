@@ -37,21 +37,32 @@ class FloatRange(GeneSpec):
 
 
 class IntRange(GeneSpec):
-    def __init__(self, low: int, high: int):
+    def __init__(self, low: int, high: int, sigma: float = 0.05):
+        """
+        Args:
+            low:   Minimum value (inclusive).
+            high:  Maximum value (inclusive).
+            sigma: Jump size as a fraction of the range width.
+                   Default 0.05 = 5% of range per mutation step.
+                   Example: IntRange(0, 100, sigma=0.05) jumps up to ±5.
+                   Use smaller sigma for fine-tuning, larger for wide exploration.
+        """
         self.low = low
         self.high = high
+        self.sigma = sigma
 
     def sample(self):
         return random.randint(self.low, self.high)
 
     def mutate(self, value, mutation_rate):
         if random.random() < mutation_rate:
-            delta = random.choice([-1, 1])
+            jump = max(1, round(self.sigma * (self.high - self.low)))
+            delta = random.randint(-jump, jump)
             value = max(min(value + delta, self.high), self.low)
         return value
 
     def describe(self):
-        return {'type': 'IntRange', 'low': self.low, 'high': self.high}
+        return {'type': 'IntRange', 'low': self.low, 'high': self.high, 'sigma': self.sigma}
 
 
 class ChoiceList(GeneSpec):
@@ -103,6 +114,153 @@ Individual = List[float]
 GeneRange = Tuple[float, float]
 Population = List[Individual]
 
+
+# ---------------------------------------------------------------------------
+# Selection strategies
+# ---------------------------------------------------------------------------
+
+class SelectionStrategy:
+    """Base class for parent selection. Subclass and implement select_parents()."""
+    def select_parents(
+        self, scored: list[tuple[dict, float]]
+    ) -> tuple[dict, dict]:
+        raise NotImplementedError
+
+    def describe(self) -> dict:
+        raise NotImplementedError
+
+
+class RouletteSelection(SelectionStrategy):
+    """
+    Fitness-proportionate (roulette wheel) selection.
+    Scores are shifted so the worst individual gets a tiny positive weight.
+    Default selection strategy.
+    """
+    def select_parents(self, scored):
+        min_score = min(s for _, s in scored)
+        weights = [(s - min_score + 1e-12) for _, s in scored]
+        parents = random.choices(scored, weights=weights, k=2)
+        return parents[0][0], parents[1][0]
+
+    def describe(self):
+        return {'strategy': 'roulette'}
+
+
+class TournamentSelection(SelectionStrategy):
+    """
+    Tournament selection. Randomly picks k individuals and returns the best.
+    Repeat twice for two parents.
+
+    Args:
+        k: Tournament size. Higher k = stronger selection pressure.
+           k=2 is gentle, k=5+ is aggressive (best individual dominates).
+    """
+    def __init__(self, k: int = 3):
+        self.k = k
+
+    def select_parents(self, scored):
+        def tournament():
+            competitors = random.sample(scored, min(self.k, len(scored)))
+            return max(competitors, key=lambda x: x[1])[0]
+        return tournament(), tournament()
+
+    def describe(self):
+        return {'strategy': 'tournament', 'k': self.k}
+
+
+class RankSelection(SelectionStrategy):
+    """
+    Rank-based selection. Assigns weights by rank (best = N, worst = 1).
+    Prevents one superstar individual from dominating when fitness values
+    differ wildly in magnitude. Steady selection pressure throughout the run.
+    """
+    def select_parents(self, scored):
+        n = len(scored)
+        # scored is already sorted best-first; assign rank weights accordingly
+        weights = [n - i for i in range(n)]
+        parents = random.choices(scored, weights=weights, k=2)
+        return parents[0][0], parents[1][0]
+
+    def describe(self):
+        return {'strategy': 'rank'}
+
+
+# ---------------------------------------------------------------------------
+# Crossover strategies
+# ---------------------------------------------------------------------------
+
+class CrossoverStrategy:
+    """Base class for crossover. Subclass and implement crossover()."""
+    def crossover(
+        self, p1: dict, p2: dict, gene_builder: 'GeneBuilder'
+    ) -> dict:
+        raise NotImplementedError
+
+    def describe(self) -> dict:
+        raise NotImplementedError
+
+
+class UniformCrossover(CrossoverStrategy):
+    """
+    Uniform crossover. Each gene is independently inherited from either
+    parent with equal probability (50/50).
+    Default crossover strategy.
+    """
+    def crossover(self, p1, p2, gene_builder):
+        return {
+            key: p1[key] if random.random() > 0.5 else p2[key]
+            for key in gene_builder.keys()
+        }
+
+    def describe(self):
+        return {'strategy': 'uniform'}
+
+
+class ArithmeticCrossover(CrossoverStrategy):
+    """
+    Arithmetic (blend) crossover for FloatRange genes.
+    Produces offspring that interpolates between parents: child = t*p1 + (1-t)*p2
+    where t is random in [0, 1]. Non-float genes fall back to uniform selection.
+
+    Better than uniform for continuous landscapes — avoids hard jumps between
+    parent values and explores the space between them.
+    """
+    def crossover(self, p1, p2, gene_builder):
+        child = {}
+        for key in gene_builder.keys():
+            spec = gene_builder.specs[key]
+            if isinstance(spec, FloatRange):
+                t = random.random()
+                child[key] = t * p1[key] + (1 - t) * p2[key]
+            else:
+                child[key] = p1[key] if random.random() > 0.5 else p2[key]
+        return child
+
+    def describe(self):
+        return {'strategy': 'arithmetic'}
+
+
+class SinglePointCrossover(CrossoverStrategy):
+    """
+    Single-point crossover. A random split index is chosen; genes before the
+    split come from p1, genes after from p2.
+
+    Preserves gene co-dependencies — genes that appear together often stay
+    together. Useful when gene order is meaningful (e.g. a sequence of
+    thresholds that build on each other).
+    """
+    def crossover(self, p1, p2, gene_builder):
+        keys = gene_builder.keys()
+        split = random.randint(1, len(keys) - 1) if len(keys) > 1 else 1
+        child = {}
+        for i, key in enumerate(keys):
+            child[key] = p1[key] if i < split else p2[key]
+        return child
+
+    def describe(self):
+        return {'strategy': 'single_point'}
+
+
 class GeneticAlgorithm:
     def __init__(
         self,
@@ -118,6 +276,8 @@ class GeneticAlgorithm:
         patience: Optional[int] = None,
         min_delta: float = 1e-6,
         log_path: Optional[str] = None,
+        selection: Optional[SelectionStrategy] = None,
+        crossover: Optional[CrossoverStrategy] = None,
     ):
         self.genes = gene_builder
         self.fitness_function = fitness_function
@@ -131,18 +291,14 @@ class GeneticAlgorithm:
         self.min_delta = min_delta
         self.log_path = log_path
         self._seed = seed
+        self._selection = selection or RouletteSelection()
+        self._crossover = crossover or UniformCrossover()
 
     def create_individual(self) -> dict:
         return self.genes.sample()
 
     def mutate(self, ind: dict) -> dict:
         return self.genes.mutate(ind, self.mutation_rate)
-    
-    def crossover(self, p1: dict, p2: dict) -> dict:
-        child = {}
-        for key in self.genes.keys():
-            child[key] = p1[key] if random.random() > 0.5 else p2[key]
-        return child
 
     def evaluate_population(self, population: list[dict]) -> list[tuple[dict, float]]:
         if self.use_multiprocessing:
@@ -151,12 +307,6 @@ class GeneticAlgorithm:
         else:
             fitnesses = [self.fitness_function(ind) for ind in population]
         return list(zip(population, fitnesses))
-
-    def select_parents(self, scored: list[tuple[dict, float]]) -> tuple[dict, dict]:
-        min_score = min(score for _, score in scored)
-        weights = [(score - min_score + 1e-12) for _, score in scored]
-        parents = random.choices(scored, weights=weights, k=2)
-        return parents[0][0], parents[1][0]
 
     def run(self) -> tuple[dict, float, list[dict]]:
         """
@@ -216,8 +366,8 @@ class GeneticAlgorithm:
 
             while len(next_gen) < self.population_size:
                 if random.random() < self.crossover_rate:
-                    p1, p2 = self.select_parents(scored)
-                    child = self.crossover(p1, p2)
+                    p1, p2 = self._selection.select_parents(scored)
+                    child = self._crossover.crossover(p1, p2, self.genes)
                 else:
                     child = random.choice(scored)[0].copy()
 
@@ -281,6 +431,8 @@ class GeneticAlgorithm:
                 'patience': self.patience,
                 'min_delta': self.min_delta,
                 'use_multiprocessing': self.use_multiprocessing,
+                'selection': self._selection.describe(),
+                'crossover': self._crossover.describe(),
             },
             'genes': self.genes.describe(),
             'result': {

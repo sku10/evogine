@@ -19,6 +19,12 @@ from genetic_engine import (
     FloatRange,
     IntRange,
     ChoiceList,
+    RouletteSelection,
+    TournamentSelection,
+    RankSelection,
+    UniformCrossover,
+    ArithmeticCrossover,
+    SinglePointCrossover,
 )
 
 
@@ -139,9 +145,9 @@ class TestIntRange:
             assert v <= 10
 
     def test_describe(self):
-        spec = IntRange(5, 50)
+        spec = IntRange(5, 50, sigma=0.1)
         d = spec.describe()
-        assert d == {"type": "IntRange", "low": 5, "high": 50}
+        assert d == {"type": "IntRange", "low": 5, "high": 50, "sigma": 0.1}
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +588,298 @@ class TestLogging:
 # ---------------------------------------------------------------------------
 # Bug fix regressions
 # ---------------------------------------------------------------------------
+
+class TestIntRangeSigma:
+    def test_default_sigma_still_valid(self):
+        spec = IntRange(0, 100)
+        for _ in range(100):
+            v = spec.mutate(50, mutation_rate=1.0)
+            assert 0 <= v <= 100
+
+    def test_wide_range_jumps_more_than_one(self):
+        """With sigma=0.1 on a range of 100, jump should be up to ±10."""
+        spec = IntRange(0, 100, sigma=0.1)
+        random.seed(0)
+        deltas = set()
+        for _ in range(200):
+            v = spec.mutate(50, mutation_rate=1.0)
+            deltas.add(abs(v - 50))
+        assert max(deltas) > 1  # should see jumps larger than ±1
+
+    def test_narrow_range_still_moves(self):
+        """IntRange(5, 7) with any sigma should still be able to mutate."""
+        spec = IntRange(5, 7, sigma=0.05)
+        random.seed(1)
+        values = {spec.mutate(6, mutation_rate=1.0) for _ in range(50)}
+        assert len(values) > 1  # should visit more than one value
+
+    def test_sigma_in_describe(self):
+        spec = IntRange(0, 50, sigma=0.2)
+        d = spec.describe()
+        assert d['sigma'] == 0.2
+
+    def test_large_sigma_converges_faster(self):
+        """Wide sigma should find the optimum in fewer generations."""
+        genes_slow = GeneBuilder()
+        genes_slow.add("n", IntRange(0, 200, sigma=0.01))  # tiny steps
+
+        genes_fast = GeneBuilder()
+        genes_fast.add("n", IntRange(0, 200, sigma=0.2))  # big steps
+
+        def fitness(ind):
+            return -abs(ind["n"] - 150)
+
+        ga_slow = GeneticAlgorithm(gene_builder=genes_slow, fitness_function=fitness,
+                                   population_size=20, generations=30, seed=42)
+        ga_fast = GeneticAlgorithm(gene_builder=genes_fast, fitness_function=fitness,
+                                   population_size=20, generations=30, seed=42)
+
+        _, score_slow, _ = ga_slow.run()
+        _, score_fast, _ = ga_fast.run()
+        assert score_fast >= score_slow  # fast sigma should reach at least as good a score
+
+
+# ---------------------------------------------------------------------------
+# Selection strategies
+# ---------------------------------------------------------------------------
+
+class TestRouletteSelection:
+    def test_returns_two_individuals(self):
+        scored = [({'x': i}, float(i)) for i in range(10)]
+        sel = RouletteSelection()
+        p1, p2 = sel.select_parents(scored)
+        assert isinstance(p1, dict) and isinstance(p2, dict)
+
+    def test_all_same_score_no_crash(self):
+        scored = [({'x': 1}, 5.0) for _ in range(10)]
+        sel = RouletteSelection()
+        p1, p2 = sel.select_parents(scored)
+        assert p1 is not None
+
+    def test_negative_scores_no_crash(self):
+        scored = [({'x': i}, float(-i)) for i in range(1, 10)]
+        sel = RouletteSelection()
+        p1, p2 = sel.select_parents(scored)
+        assert p1 is not None
+
+    def test_describe(self):
+        assert RouletteSelection().describe() == {'strategy': 'roulette'}
+
+
+class TestTournamentSelection:
+    def test_returns_two_individuals(self):
+        scored = [({'x': i}, float(i)) for i in range(10)]
+        sel = TournamentSelection(k=3)
+        p1, p2 = sel.select_parents(scored)
+        assert isinstance(p1, dict) and isinstance(p2, dict)
+
+    def test_k_larger_than_population_no_crash(self):
+        scored = [({'x': i}, float(i)) for i in range(3)]
+        sel = TournamentSelection(k=10)
+        p1, p2 = sel.select_parents(scored)
+        assert p1 is not None
+
+    def test_high_k_favours_best(self):
+        """With k = population_size, best individual should always win."""
+        scored = [({'x': i}, float(i)) for i in range(20)]
+        sel = TournamentSelection(k=20)
+        random.seed(0)
+        for _ in range(20):
+            p1, _ = sel.select_parents(scored)
+            assert p1['x'] == 19  # highest score always wins
+
+    def test_describe(self):
+        assert TournamentSelection(k=5).describe() == {'strategy': 'tournament', 'k': 5}
+
+
+class TestRankSelection:
+    def test_returns_two_individuals(self):
+        scored = [({'x': i}, float(i)) for i in range(10)]
+        sel = RankSelection()
+        p1, p2 = sel.select_parents(scored)
+        assert isinstance(p1, dict) and isinstance(p2, dict)
+
+    def test_works_with_negative_scores(self):
+        scored = [({'x': i}, float(-i * 100)) for i in range(10)]
+        sel = RankSelection()
+        p1, p2 = sel.select_parents(scored)
+        assert p1 is not None
+
+    def test_describe(self):
+        assert RankSelection().describe() == {'strategy': 'rank'}
+
+
+# ---------------------------------------------------------------------------
+# Crossover strategies
+# ---------------------------------------------------------------------------
+
+class TestUniformCrossover:
+    def test_child_has_all_keys(self):
+        genes = GeneBuilder()
+        genes.add("a", FloatRange(0, 1))
+        genes.add("b", IntRange(0, 10))
+        xo = UniformCrossover()
+        p1 = {'a': 0.1, 'b': 2}
+        p2 = {'a': 0.9, 'b': 8}
+        child = xo.crossover(p1, p2, genes)
+        assert set(child.keys()) == {'a', 'b'}
+
+    def test_child_values_come_from_parents(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0, 1))
+        xo = UniformCrossover()
+        random.seed(0)
+        for _ in range(50):
+            child = xo.crossover({'x': 0.1}, {'x': 0.9}, genes)
+            assert child['x'] in (0.1, 0.9)
+
+    def test_describe(self):
+        assert UniformCrossover().describe() == {'strategy': 'uniform'}
+
+
+class TestArithmeticCrossover:
+    def test_child_has_all_keys(self):
+        genes = GeneBuilder()
+        genes.add("f", FloatRange(0, 10))
+        genes.add("i", IntRange(0, 10))
+        genes.add("c", ChoiceList(["a", "b"]))
+        xo = ArithmeticCrossover()
+        p1 = {'f': 2.0, 'i': 3, 'c': 'a'}
+        p2 = {'f': 8.0, 'i': 7, 'c': 'b'}
+        child = xo.crossover(p1, p2, genes)
+        assert set(child.keys()) == {'f', 'i', 'c'}
+
+    def test_float_child_between_parents(self):
+        genes = GeneBuilder()
+        genes.add("f", FloatRange(0, 10))
+        xo = ArithmeticCrossover()
+        random.seed(0)
+        for _ in range(50):
+            child = xo.crossover({'f': 2.0}, {'f': 8.0}, genes)
+            assert 2.0 <= child['f'] <= 8.0
+
+    def test_non_float_uses_uniform(self):
+        genes = GeneBuilder()
+        genes.add("i", IntRange(0, 10))
+        genes.add("c", ChoiceList(["x", "y"]))
+        xo = ArithmeticCrossover()
+        random.seed(0)
+        for _ in range(50):
+            child = xo.crossover({'i': 1, 'c': 'x'}, {'i': 9, 'c': 'y'}, genes)
+            assert child['i'] in (1, 9)
+            assert child['c'] in ('x', 'y')
+
+    def test_describe(self):
+        assert ArithmeticCrossover().describe() == {'strategy': 'arithmetic'}
+
+
+class TestSinglePointCrossover:
+    def test_child_has_all_keys(self):
+        genes = GeneBuilder()
+        genes.add("a", FloatRange(0, 1))
+        genes.add("b", FloatRange(0, 1))
+        genes.add("c", FloatRange(0, 1))
+        xo = SinglePointCrossover()
+        p1 = {'a': 0.1, 'b': 0.1, 'c': 0.1}
+        p2 = {'a': 0.9, 'b': 0.9, 'c': 0.9}
+        child = xo.crossover(p1, p2, genes)
+        assert set(child.keys()) == {'a', 'b', 'c'}
+
+    def test_values_come_from_parents(self):
+        genes = GeneBuilder()
+        genes.add("a", FloatRange(0, 1))
+        genes.add("b", FloatRange(0, 1))
+        genes.add("c", FloatRange(0, 1))
+        xo = SinglePointCrossover()
+        random.seed(0)
+        for _ in range(30):
+            p1 = {'a': 0.1, 'b': 0.1, 'c': 0.1}
+            p2 = {'a': 0.9, 'b': 0.9, 'c': 0.9}
+            child = xo.crossover(p1, p2, genes)
+            for key in child:
+                assert child[key] in (0.1, 0.9)
+
+    def test_single_gene_no_crash(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0, 1))
+        xo = SinglePointCrossover()
+        child = xo.crossover({'x': 0.2}, {'x': 0.8}, genes)
+        assert 'x' in child
+
+    def test_describe(self):
+        assert SinglePointCrossover().describe() == {'strategy': 'single_point'}
+
+
+# ---------------------------------------------------------------------------
+# GA integration tests for strategies
+# ---------------------------------------------------------------------------
+
+class TestGAWithStrategies:
+    def _run(self, selection=None, crossover=None):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+        genes.add("y", FloatRange(0.0, 10.0))
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=peak_fitness,
+            population_size=50,
+            generations=50,
+            mutation_rate=0.2,
+            seed=42,
+            selection=selection,
+            crossover=crossover,
+        )
+        return ga.run()
+
+    def test_tournament_selection_converges(self):
+        best, score, _ = self._run(selection=TournamentSelection(k=3))
+        assert score > -1.0
+
+    def test_rank_selection_converges(self):
+        best, score, _ = self._run(selection=RankSelection())
+        assert score > -1.0
+
+    def test_arithmetic_crossover_converges(self):
+        best, score, _ = self._run(crossover=ArithmeticCrossover())
+        assert score > -1.0
+
+    def test_single_point_crossover_converges(self):
+        best, score, _ = self._run(crossover=SinglePointCrossover())
+        assert score > -1.0
+
+    def test_tournament_plus_arithmetic_converges(self):
+        best, score, _ = self._run(
+            selection=TournamentSelection(k=4),
+            crossover=ArithmeticCrossover(),
+        )
+        assert score > -1.0
+
+    def test_default_strategies_unchanged(self):
+        """No selection/crossover args → same results as before."""
+        best, score, _ = self._run()
+        assert score > -1.0
+
+    def test_log_includes_strategy_names(self, tmp_path):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0, 10))
+        log_file = str(tmp_path / "run.json")
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=lambda ind: -ind["x"],
+            population_size=10,
+            generations=3,
+            seed=1,
+            selection=TournamentSelection(k=3),
+            crossover=ArithmeticCrossover(),
+            log_path=log_file,
+        )
+        ga.run()
+        import json
+        with open(log_file) as f:
+            data = json.load(f)
+        assert data["config"]["selection"]["strategy"] == "tournament"
+        assert data["config"]["crossover"]["strategy"] == "arithmetic"
+
 
 class TestBugFixes:
     def test_seed_is_respected(self):
