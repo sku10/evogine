@@ -278,7 +278,17 @@ class GeneticAlgorithm:
         log_path: Optional[str] = None,
         selection: Optional[SelectionStrategy] = None,
         crossover: Optional[CrossoverStrategy] = None,
+        on_generation: Optional[Callable] = None,
     ):
+        """
+        Args:
+            on_generation: Optional callback called after each generation.
+                Signature: fn(gen, best_score, avg_score, best_individual) -> None
+                Use for live plotting, custom logging, progress bars, etc.
+                Example:
+                    def my_callback(gen, best_score, avg_score, best_ind):
+                        print(f"Gen {gen}: {best_score:.4f}")
+        """
         self.genes = gene_builder
         self.fitness_function = fitness_function
         self.population_size = population_size
@@ -293,6 +303,7 @@ class GeneticAlgorithm:
         self._seed = seed
         self._selection = selection or RouletteSelection()
         self._crossover = crossover or UniformCrossover()
+        self._on_generation = on_generation
 
     def create_individual(self) -> dict:
         return self.genes.sample()
@@ -355,6 +366,9 @@ class GeneticAlgorithm:
             })
 
             print(f"[GEN {gen:05}] Best: {gen_best:.11f} | Avg: {gen_avg:.11f}")
+
+            if self._on_generation is not None:
+                self._on_generation(gen, gen_best, gen_avg, best_overall)
 
             # Early stopping
             if self.patience is not None and gens_without_improvement >= self.patience:

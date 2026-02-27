@@ -881,6 +881,102 @@ class TestGAWithStrategies:
         assert data["config"]["crossover"]["strategy"] == "arithmetic"
 
 
+class TestCallback:
+    def test_callback_called_each_generation(self):
+        call_count = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            call_count.append(gen)
+
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=8, on_generation=cb)
+        ga.run()
+        assert call_count == list(range(1, 9))
+
+    def test_callback_receives_correct_gen_numbers(self):
+        received = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            received.append(gen)
+
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=5, on_generation=cb)
+        ga.run()
+        assert received == [1, 2, 3, 4, 5]
+
+    def test_callback_receives_scores(self):
+        scores = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            scores.append((best_score, avg_score))
+
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=5, on_generation=cb)
+        ga.run()
+        assert len(scores) == 5
+        for best, avg in scores:
+            assert isinstance(best, float)
+            assert isinstance(avg, float)
+            assert best >= avg  # best is always >= avg
+
+    def test_callback_receives_best_individual(self):
+        individuals = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            individuals.append(best_ind)
+
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=5, on_generation=cb)
+        ga.run()
+        for ind in individuals:
+            assert isinstance(ind, dict)
+            assert 'x' in ind and 'y' in ind
+
+    def test_callback_fires_on_early_stop(self):
+        call_count = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            call_count.append(gen)
+
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes,
+            fitness_function=sphere_fitness,
+            population_size=50,
+            generations=200,
+            mutation_rate=0.2,
+            seed=42,
+            patience=5,
+            on_generation=cb,
+        )
+        _, _, history = ga.run()
+        assert len(call_count) == len(history)
+        assert len(call_count) < 200
+
+    def test_no_callback_still_works(self):
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=5)
+        best, score, history = ga.run()
+        assert best is not None
+
+    def test_callback_can_accumulate_data(self):
+        """Typical use case: accumulate data for plotting."""
+        data = {'gens': [], 'best': [], 'avg': []}
+
+        def cb(gen, best_score, avg_score, best_ind):
+            data['gens'].append(gen)
+            data['best'].append(best_score)
+            data['avg'].append(avg_score)
+
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, generations=10, on_generation=cb)
+        _, _, history = ga.run()
+
+        assert len(data['gens']) == 10
+        assert data['best'] == [h['best_score'] for h in history]
+        assert data['avg'] == [h['avg_score'] for h in history]
+
+
 class TestBugFixes:
     def test_seed_is_respected(self):
         """Regression: seed was previously set to time.time() instead of the value."""
