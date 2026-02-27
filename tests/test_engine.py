@@ -977,6 +977,134 @@ class TestCallback:
         assert data['avg'] == [h['avg_score'] for h in history]
 
 
+class TestMinimizeMode:
+    def test_minimize_finds_minimum(self):
+        """Minimize MSE — optimum at x=3.14, y=2.72 with error=0."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+        genes.add("y", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 3.14)**2 + (ind["y"] - 2.72)**2
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=80, generations=100,
+            mutation_rate=0.2, seed=42, mode='minimize',
+        )
+        best, score, _ = ga.run()
+        assert score >= 0               # real error value, not negated
+        assert score < 0.5              # found something close to minimum
+        assert abs(best["x"] - 3.14) < 0.5
+        assert abs(best["y"] - 2.72) < 0.5
+
+    def test_minimize_score_is_real_value_not_negated(self):
+        """Returned score must be the real error value, not the internal negated one."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 5.0)**2  # always >= 0
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=30, generations=20,
+            seed=42, mode='minimize',
+        )
+        _, score, _ = ga.run()
+        assert score >= 0  # must be positive real error, never negative
+
+    def test_minimize_history_scores_are_real(self):
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 5.0)**2
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=30, generations=10,
+            seed=42, mode='minimize',
+        )
+        _, _, history = ga.run()
+        for h in history:
+            assert h['best_score'] >= 0  # real error, never negative
+
+    def test_minimize_history_best_decreases(self):
+        """For minimize mode, best_score in history should trend downward."""
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 5.0)**2
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=50, generations=30,
+            seed=42, mode='minimize',
+        )
+        _, _, history = ga.run()
+        scores = [h['best_score'] for h in history]
+        # Best score should never get worse (increase) in minimize mode
+        for i in range(1, len(scores)):
+            assert scores[i] <= scores[i - 1] + 1e-12
+
+    def test_maximize_still_works(self):
+        """Default mode unchanged."""
+        genes = sphere_genes()
+        ga = make_simple_ga(genes, sphere_fitness, mode='maximize')
+        _, score, _ = ga.run()
+        assert score <= 0  # sphere returns negative values
+
+    def test_invalid_mode_raises(self):
+        genes = sphere_genes()
+        with pytest.raises(ValueError, match="mode must be"):
+            GeneticAlgorithm(gene_builder=genes, fitness_function=sphere_fitness,
+                             mode='sideways')
+
+    def test_minimize_log_shows_real_score(self, tmp_path):
+        log_file = str(tmp_path / "run.json")
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 5.0)**2
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=20, generations=5,
+            seed=1, mode='minimize', log_path=log_file,
+        )
+        _, score, _ = ga.run()
+        import json
+        with open(log_file) as f:
+            data = json.load(f)
+        assert data['result']['best_score'] == score
+        assert data['result']['best_score'] >= 0
+        assert data['config']['mode'] == 'minimize'
+
+    def test_minimize_callback_receives_real_scores(self):
+        received = []
+
+        def cb(gen, best_score, avg_score, best_ind):
+            received.append(best_score)
+
+        genes = GeneBuilder()
+        genes.add("x", FloatRange(0.0, 10.0))
+
+        def error(ind):
+            return (ind["x"] - 5.0)**2
+
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=error,
+            population_size=30, generations=5,
+            seed=1, mode='minimize', on_generation=cb,
+        )
+        ga.run()
+        for score in received:
+            assert score >= 0  # real error, not negated
+
+
 class TestBugFixes:
     def test_seed_is_respected(self):
         """Regression: seed was previously set to time.time() instead of the value."""

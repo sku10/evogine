@@ -279,6 +279,7 @@ class GeneticAlgorithm:
         selection: Optional[SelectionStrategy] = None,
         crossover: Optional[CrossoverStrategy] = None,
         on_generation: Optional[Callable] = None,
+        mode: str = 'maximize',
     ):
         """
         Args:
@@ -288,7 +289,14 @@ class GeneticAlgorithm:
                 Example:
                     def my_callback(gen, best_score, avg_score, best_ind):
                         print(f"Gen {gen}: {best_score:.4f}")
+
+            mode: 'maximize' (default) or 'minimize'.
+                With 'minimize', your fitness function returns the value to
+                minimize directly (e.g. error, loss, drawdown) — no negation needed.
+                All reported scores (history, log, return value) are the real values.
         """
+        if mode not in ('maximize', 'minimize'):
+            raise ValueError(f"mode must be 'maximize' or 'minimize', got {mode!r}")
         self.genes = gene_builder
         self.fitness_function = fitness_function
         self.population_size = population_size
@@ -304,6 +312,8 @@ class GeneticAlgorithm:
         self._selection = selection or RouletteSelection()
         self._crossover = crossover or UniformCrossover()
         self._on_generation = on_generation
+        self._mode = mode
+        self._sign = -1 if mode == 'minimize' else 1
 
     def create_individual(self) -> dict:
         return self.genes.sample()
@@ -317,6 +327,8 @@ class GeneticAlgorithm:
                 fitnesses = pool.map(self.fitness_function, population)
         else:
             fitnesses = [self.fitness_function(ind) for ind in population]
+        if self._mode == 'minimize':
+            fitnesses = [-f for f in fitnesses]
         return list(zip(population, fitnesses))
 
     def run(self) -> tuple[dict, float, list[dict]]:
@@ -357,18 +369,21 @@ class GeneticAlgorithm:
             else:
                 gens_without_improvement += 1
 
+            real_best = gen_best * self._sign
+            real_avg  = gen_avg  * self._sign
+
             history.append({
                 'gen': gen,
-                'best_score': gen_best,
-                'avg_score': gen_avg,
+                'best_score': real_best,
+                'avg_score': real_avg,
                 'improved': improved,
                 'gens_without_improvement': gens_without_improvement,
             })
 
-            print(f"[GEN {gen:05}] Best: {gen_best:.11f} | Avg: {gen_avg:.11f}")
+            print(f"[GEN {gen:05}] Best: {real_best:.11f} | Avg: {real_avg:.11f}")
 
             if self._on_generation is not None:
-                self._on_generation(gen, gen_best, gen_avg, best_overall)
+                self._on_generation(gen, real_best, real_avg, best_overall)
 
             # Early stopping
             if self.patience is not None and gens_without_improvement >= self.patience:
@@ -396,10 +411,12 @@ class GeneticAlgorithm:
             gens_without_improvement >= self.patience
         )
 
-        if self.log_path:
-            self._write_log(best_overall, best_score, history, elapsed, early_stopped, convergence_gen)
+        real_best_score = best_score * self._sign
 
-        return best_overall, best_score, history
+        if self.log_path:
+            self._write_log(best_overall, real_best_score, history, elapsed, early_stopped, convergence_gen)
+
+        return best_overall, real_best_score, history
 
     def _write_log(
         self,
@@ -445,6 +462,7 @@ class GeneticAlgorithm:
                 'patience': self.patience,
                 'min_delta': self.min_delta,
                 'use_multiprocessing': self.use_multiprocessing,
+                'mode': self._mode,
                 'selection': self._selection.describe(),
                 'crossover': self._crossover.describe(),
             },
