@@ -20,7 +20,7 @@ settings = hypothesis.settings
 assume = hypothesis.assume
 st = hypothesis.strategies
 
-from genetic_engine import (
+from evogine import (
     FloatRange,
     IntRange,
     ChoiceList,

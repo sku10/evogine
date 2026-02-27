@@ -104,7 +104,7 @@ diversity.
 
 **API sketch:**
 ```python
-from genetic_engine import compare_runs
+from evogine import compare_runs
 
 compare_runs(["run_001.json", "run_002.json", "run_003.json"])
 # Prints a table: config differences, best scores, convergence gen, patterns
@@ -125,22 +125,134 @@ running multiple tuning iterations would use this to understand which direction 
 
 ### Formal Benchmark Suite
 
-A small set of standard benchmark functions with known optima — so a user can verify
-the library is working correctly on their system before applying it to their real problem.
+A set of standard benchmark problems with known optima — serves two purposes:
+(1) verify the library works correctly on your system before running a real problem,
+(2) compare optimizers side by side on representative problem types.
 
-**Why:** Before trusting a GA on a 6-hour stock backtest, you want to know it actually
-works. Standard benchmarks give a ground truth to check against.
+**Why it matters for library selection:** A user evaluating this library vs DEAP vs
+something else can run the benchmark and see concrete numbers — not claims.
+"CMA-ES solved Rosenbrock in 180 evaluations, GA needed 4,200" is a decision.
 
-**Functions:**
-- Sphere: `f(x) = Σxi²`, optimum at origin = 0
-- Rastrigin: multi-modal, optimum at origin = 0
-- Rosenbrock: narrow curved valley, optimum at (1,1,...) = 0
-- OneMax: binary genes, optimum = all ones
+**Benchmark problems:**
 
-**Format:** `examples/benchmarks.py` — runnable script that tests each benchmark and
-reports whether the library found the optimum within expected generations.
+| Problem | Type | What it tests | Expected winner |
+|---|---|---|---|
+| Sphere (2D, 5D, 10D) | Unimodal float | Basic convergence, scaling | CMA-ES |
+| Rosenbrock | Correlated float | Curved narrow valley, gene correlation | CMA-ES dramatically |
+| Rastrigin | Multimodal float | Local optima escape | IslandModel |
+| OneMax | Categorical/binary | Discrete gene handling | GA |
+| Mixed (float + int + choice) | Mixed types | Real-world gene mix | GA (only supported) |
 
-**Effort:** Small. Most of the benchmark logic already exists in the tests.
+**What the output looks like:**
+```
+Sphere 5D
+  GeneticAlgorithm : found optimum in  89 gens / 8,900 evals  ✓
+  CMAESOptimizer   : found optimum in  31 gens /   310 evals  ✓  (28x fewer evals)
+
+Rosenbrock 5D
+  GeneticAlgorithm : did not converge in 500 gens              ✗
+  CMAESOptimizer   : found optimum in  67 gens /   670 evals  ✓
+
+Rastrigin 5D (multimodal)
+  GeneticAlgorithm : best score -3.2 (local optimum)           ~
+  IslandModel      : found optimum in 120 gens                 ✓
+  CMAESOptimizer   : best score -2.1 (trapped in local opt)    ~
+```
+
+**Small prerequisite:** Add `total_evaluations` to result logs (`popsize × generations_run`
+for GA, `lambda × generations_run` for CMA-ES). Makes the comparison concrete and dramatic.
+
+**Format:** `examples/benchmarks.py` — runnable script, human-readable table output,
+optionally saves comparison JSON for further analysis.
+
+**Effort:** Small-to-medium. Benchmark functions are simple; the comparison table logic
+is the main work.
+
+---
+
+### Optimizer Auto-Selection Tool
+
+**The idea:** Given a user's gene definitions and a small sample fitness function,
+automatically run all relevant optimizers for a short trial (e.g. 20 generations)
+and recommend which one to use for the full run — with reasoning.
+
+**Why this is powerful:** A new user doesn't know whether their problem is unimodal or
+multimodal, whether genes are correlated, or whether CMA-ES or an IslandModel will win.
+The auto-selector runs the experiment for them.
+
+```python
+from evogine import select_optimizer
+
+recommendation = select_optimizer(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    trial_generations = 20,    # short trial per optimizer
+    seed             = 42,
+)
+
+# recommendation:
+# {
+#   'winner':      'CMAESOptimizer',
+#   'reason':      'All genes are FloatRange and CMA-ES converged 8x faster in trial',
+#   'scores':      {'GeneticAlgorithm': 1.42, 'CMAESOptimizer': 1.89},
+#   'evals':       {'GeneticAlgorithm': 2000, 'CMAESOptimizer': 200},
+#   'suggestion':  'Run CMAESOptimizer with sigma0=0.3, patience=30',
+# }
+```
+
+**What it actually tests in the trial:**
+- If any non-FloatRange genes → skip CMA-ES immediately (it can't handle them)
+- Run GA, CMA-ES (if eligible), IslandModel for `trial_generations` each
+- Compare: best score achieved, evaluations used, diversity curve shape
+- Detect early signals: diversity collapse (too aggressive), flat score (too slow)
+
+**Output levels:**
+- `recommend_only=True` → just prints a recommendation and config suggestion
+- `recommend_only=False` → returns full dict for programmatic use or AI agent input
+
+**Why this aligns with PRINCIPLES.md:** This is Phase 2.5 of the AI co-pilot vision.
+The library itself can reason about which tool fits the problem — before involving an
+external AI agent. The AI agent then gets a pre-filtered, well-reasoned starting point.
+
+**Effort:** Medium. Mostly orchestration — run optimizers, compare results, apply
+decision rules. Decision rules can start simple (gene type check + score comparison)
+and get smarter over time.
+
+---
+
+### AI-Driven Model Selection
+
+**The bigger idea (Phase 3 of PRINCIPLES.md):** The user provides their genes, fitness
+function, and a goal (e.g. "converge within 100 generations, maximize Sharpe > 1.5").
+An AI agent:
+
+1. Runs `select_optimizer()` to get trial data
+2. Reads the trial logs + features.md
+3. Selects the best optimizer and starting parameters
+4. Runs the full optimization
+5. Reads the result log
+6. If goal not met: adjusts parameters, reruns
+7. Returns the best configuration found
+
+```python
+from evogine import ai_optimize
+
+best, score, report = ai_optimize(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    goal             = "maximize, target > 1.5, converge within 100 gens",
+    max_attempts     = 5,
+    anthropic_key    = "...",
+)
+# report contains: which optimizers were tried, what was adjusted, why it worked
+```
+
+**Why this is the endgame:** The library was designed from day one — structured logs,
+shared vocabulary with docs, pre-computed analysis — specifically so this is possible.
+The benchmark and auto-selector are the stepping stones that make this reliable.
+
+**Effort:** Large, but built on top of everything already here. The library is already
+ready for this. The remaining work is the agent orchestration layer.
 
 ---
 

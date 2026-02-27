@@ -43,7 +43,7 @@ Continuous float parameter. Mutation adds Gaussian noise: the jump size is
 roughly 10% of the range width.
 
 ```python
-from genetic_engine import FloatRange
+from evogine import FloatRange
 
 genes.add("threshold",   FloatRange(0.0, 1.0))              # ±0.1 per step
 genes.add("weight",      FloatRange(-5.0, 5.0, sigma=0.05)) # finer steps: ±0.5
@@ -61,7 +61,7 @@ Integer parameter. Jump size scales with range width:
 `jump = max(1, round(sigma × (high - low)))`.
 
 ```python
-from genetic_engine import IntRange
+from evogine import IntRange
 
 genes.add("lookback",  IntRange(3, 50))              # jump = max(1, round(0.05×47)) = 2
 genes.add("ma_period", IntRange(5, 200))             # jump = max(1, round(0.05×195)) = 10
@@ -83,7 +83,7 @@ Categorical parameter. Mutation always picks a *different* item — never stays 
 when mutating (unless only one option exists, which is safe).
 
 ```python
-from genetic_engine import ChoiceList
+from evogine import ChoiceList
 
 genes.add("ma_type",    ChoiceList(["sma", "ema", "wma"]))
 genes.add("fib_level",  ChoiceList([3, 5, 8, 13, 21, 34]))
@@ -101,7 +101,7 @@ Composes named genes into a genome. Individuals are plain Python `dict`s — no 
 classes, no indices, just names.
 
 ```python
-from genetic_engine import GeneBuilder, FloatRange, IntRange, ChoiceList
+from evogine import GeneBuilder, FloatRange, IntRange, ChoiceList
 
 genes = GeneBuilder()
 genes.add("entry_threshold", FloatRange(0.0, 1.0))
@@ -143,7 +143,7 @@ is passed as. Per-gene rates appear in `describe()` output and in the JSON log.
 ## GeneticAlgorithm — Full Parameter Reference
 
 ```python
-from genetic_engine import GeneticAlgorithm
+from evogine import GeneticAlgorithm
 
 ga = GeneticAlgorithm(
     gene_builder        = genes,         # GeneBuilder (required)
@@ -290,7 +290,7 @@ predictable strategy across different problem types.
 (e.g. trading thresholds). Use `UniformCrossover` for mixed types.
 
 ```python
-from genetic_engine import TournamentSelection, ArithmeticCrossover
+from evogine import TournamentSelection, ArithmeticCrossover
 
 ga = GeneticAlgorithm(
     ...,
@@ -314,7 +314,7 @@ will be picked almost every time. Diversity collapses quickly. Works fine on sim
 smooth landscapes but struggles on complex ones.
 
 ```python
-from genetic_engine import RouletteSelection
+from evogine import RouletteSelection
 ga = GeneticAlgorithm(..., selection=RouletteSelection())
 ```
 
@@ -324,7 +324,7 @@ Randomly sample `k` individuals, return the best. No score normalization needed 
 works natively with negative fitness values.
 
 ```python
-from genetic_engine import TournamentSelection
+from evogine import TournamentSelection
 ga = GeneticAlgorithm(..., selection=TournamentSelection(k=4))
 ```
 
@@ -342,7 +342,7 @@ ignoring actual score values. A score of 1000 vs. 999 gives the same relative ad
 as 0.001 vs. 0.0009.
 
 ```python
-from genetic_engine import RankSelection
+from evogine import RankSelection
 ga = GeneticAlgorithm(..., selection=RankSelection())
 ```
 
@@ -360,7 +360,7 @@ Each gene is independently taken from either parent with 50/50 probability.
 Child genes are a random mix across the entire genome.
 
 ```python
-from genetic_engine import UniformCrossover
+from evogine import UniformCrossover
 ga = GeneticAlgorithm(..., crossover=UniformCrossover())
 ```
 
@@ -375,7 +375,7 @@ The child gene is a weighted blend of both parents — it falls somewhere betwee
 Non-float genes fall back to uniform.
 
 ```python
-from genetic_engine import ArithmeticCrossover
+from evogine import ArithmeticCrossover
 ga = GeneticAlgorithm(..., crossover=ArithmeticCrossover())
 ```
 
@@ -389,7 +389,7 @@ A random split index is chosen. Genes before the split come from parent 1, genes
 after from parent 2. Preserves co-dependencies among adjacent genes.
 
 ```python
-from genetic_engine import SinglePointCrossover
+from evogine import SinglePointCrossover
 ga = GeneticAlgorithm(..., crossover=SinglePointCrossover())
 ```
 
@@ -708,7 +708,7 @@ Multiple independent populations (islands) that evolve in isolation, with occasi
 migration of top individuals between them.
 
 ```python
-from genetic_engine import IslandModel, TournamentSelection, ArithmeticCrossover
+from evogine import IslandModel, TournamentSelection, ArithmeticCrossover
 
 im = IslandModel(
     gene_builder       = genes,
@@ -769,7 +769,7 @@ instead finds the **Pareto front**: the set of all solutions where you can't imp
 one objective without worsening another.
 
 ```python
-from genetic_engine import MultiObjectiveGA
+from evogine import MultiObjectiveGA
 
 def fitness(ind: dict) -> list[float]:
     bt = run_backtest(**ind)
@@ -909,7 +909,7 @@ Mitigation: run multiple times with different seeds and take the best result.
 ### API
 
 ```python
-from genetic_engine import CMAESOptimizer, GeneBuilder, FloatRange
+from evogine import CMAESOptimizer, GeneBuilder, FloatRange
 
 genes = GeneBuilder()
 genes.add("threshold", FloatRange(0.0, 1.0))
@@ -1141,7 +1141,7 @@ The tests are automatically skipped if hypothesis is not installed.
 Subclass `GeneSpec` and implement three methods:
 
 ```python
-from genetic_engine import GeneSpec
+from evogine import GeneSpec
 
 class LogRange(GeneSpec):
     """Float gene sampled on a log scale — ideal for learning rates, regularization, etc."""
@@ -1179,7 +1179,7 @@ genes.add("learning_rate", LogRange(1e-5, 1e-1))
 ## Complete Example
 
 ```python
-from genetic_engine import (
+from evogine import (
     GeneticAlgorithm, GeneBuilder,
     FloatRange, IntRange, ChoiceList,
     TournamentSelection, ArithmeticCrossover,

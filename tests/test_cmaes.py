@@ -22,7 +22,7 @@ import sys
 import tempfile
 import pytest
 
-from genetic_engine import (
+from evogine import (
     CMAESOptimizer,
     GeneBuilder,
     FloatRange,

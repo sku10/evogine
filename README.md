@@ -1,4 +1,4 @@
-# genetic-engine
+# evogine
 
 A clean, controllable genetic algorithm library for Python.
 
@@ -10,14 +10,14 @@ gene ranges, and require excessive boilerplate. This library stays small, readab
 ## Install
 
 ```bash
-pip install genetic-engine
+pip install evogine
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/yourname/genetic-engine
-cd genetic-engine
+git clone https://github.com/yourname/evogine
+cd evogine
 pip install -e .
 ```
 
@@ -26,7 +26,7 @@ pip install -e .
 ## Quick Start
 
 ```python
-from genetic_engine import (
+from evogine import (
     GeneticAlgorithm, GeneBuilder,
     FloatRange, IntRange, ChoiceList,
 )
@@ -128,7 +128,7 @@ Individuals are plain Python `dict`s — no special classes, no magic.
 **Selection** controls which individuals get to reproduce.
 
 ```python
-from genetic_engine import TournamentSelection, RankSelection, RouletteSelection
+from evogine import TournamentSelection, RankSelection, RouletteSelection
 
 # TournamentSelection — recommended for most problems
 # k controls pressure: k=2 gentle, k=7+ aggressive
@@ -144,7 +144,7 @@ ga = GeneticAlgorithm(..., selection=RouletteSelection())
 **Crossover** controls how two parents produce a child.
 
 ```python
-from genetic_engine import ArithmeticCrossover, SinglePointCrossover, UniformCrossover
+from evogine import ArithmeticCrossover, SinglePointCrossover, UniformCrossover
 
 # ArithmeticCrossover — blends float values between parents; best for continuous problems
 ga = GeneticAlgorithm(..., crossover=ArithmeticCrossover())
@@ -228,7 +228,7 @@ for h in history:
 Multiple independent populations exploring different regions, with periodic migration:
 
 ```python
-from genetic_engine import IslandModel
+from evogine import IslandModel
 
 im = IslandModel(
     gene_builder       = genes,
@@ -255,7 +255,7 @@ This maintains diversity while still converging — better than one large popula
 When you have competing goals that can't be collapsed into one score:
 
 ```python
-from genetic_engine import MultiObjectiveGA
+from evogine import MultiObjectiveGA
 
 def fitness(ind: dict) -> list[float]:
     bt = run_backtest(**ind)
@@ -290,7 +290,7 @@ a standard GA because it **learns the shape of the fitness landscape** rather th
 searching blindly.
 
 ```python
-from genetic_engine import CMAESOptimizer
+from evogine import CMAESOptimizer
 
 opt = CMAESOptimizer(
     gene_builder     = genes,   # FloatRange genes only

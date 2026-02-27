@@ -13,7 +13,7 @@ import os
 import pytest
 import random
 
-from genetic_engine import (
+from evogine import (
     GeneticAlgorithm,
     GeneBuilder,
     FloatRange,

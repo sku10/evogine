@@ -6,7 +6,7 @@ import json
 import os
 import pytest
 
-from genetic_engine import (
+from evogine import (
     GeneBuilder,
     FloatRange,
     IntRange,

@@ -16,7 +16,7 @@ import math
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-from genetic_engine import (
+from evogine import (
     GeneticAlgorithm,
     GeneBuilder,
     FloatRange,
