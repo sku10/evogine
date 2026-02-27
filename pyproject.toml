@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "genetic-engine"          # TODO: rename before publishing to PyPI
+version = "0.1.0"
+description = "A clean, controllable genetic algorithm library with named genes, strict bounds, early stopping, and structured logging."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov",
+]
+
+[project.urls]
+Homepage   = "https://github.com/yourname/genetic-engine"
+Repository = "https://github.com/yourname/genetic-engine"
+Issues     = "https://github.com/yourname/genetic-engine/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["genetic_engine*"]
