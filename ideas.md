@@ -271,6 +271,78 @@ calls an AI API with the log + relevant docs section, prints the recommendation.
 
 ---
 
+### Optimization Visualization
+
+Visualize what the optimizer is doing — especially useful for understanding convergence
+behavior, comparing optimizers, and building intuition about fitness landscapes.
+
+**The core challenge:** Real problems have N genes = N dimensions. Can't plot a 20D
+surface. But there are well-known techniques to project into 2D/3D.
+
+**Visualization modes:**
+
+| Mode | Input | Output | Best for |
+|---|---|---|---|
+| 2-gene surface | 2 genes, fitness | 3D surface plot (X, Y = genes, Z = fitness) | Problems with exactly 2 float genes |
+| Gene-pair slice | N genes, pick 2, freeze rest at best values | 3D surface or contour map of the slice | Exploring one pair at a time in high-dim problems |
+| Convergence path | Population history + 2-gene slice | Contour map with generation-by-generation path overlay | Seeing how the optimizer navigates the landscape |
+| CMA-ES ellipse animation | CMA-ES history + 2-gene slice | Contour map with covariance ellipse shrinking/rotating per gen | Understanding why CMA-ES adapts faster than GA |
+| PCA projection | All individuals from history | 2D scatter, color = fitness | Seeing main search directions in high-dim problems |
+| t-SNE / UMAP | All individuals from history | 2D scatter, color = fitness | Visualizing population clusters in very high dimensions |
+
+**Convergence path + CMA-ES ellipse is the money shot:** On a contour map you literally
+see GA searching in circles while CMA-ES tilts its ellipse to follow the valley. One
+image explains the 10-100x convergence difference better than any text.
+
+**3D point cloud with transparency cutoff (the interactive mode):**
+For 3 genes (or N genes projected to 3 via PCA), render the fitness landscape as a
+rotatable 3D point cloud. Each point's color intensity = fitness value. Points below
+a cutoff threshold (e.g. 70th percentile) are fully transparent — so you can see
+*through* the low-fitness void and the high-fitness peaks glow like hot spots floating
+in space. Rotate freely to inspect ridges, valleys, and clusters from any angle.
+
+Two-layer rendering: the fitness landscape is semi-transparent colored dots (intensity
+= fitness, low fitness = fully transparent). The actual candidate individuals are
+small solid black dots — always visible, even deep inside a dense peak region. You
+see the "actors" moving through the "world."
+
+Animation layer: render one generation at a time and watch the black candidate dots
+swarm through the transparent space toward the peak. Like a time-lapse X-ray of the
+optimization process.
+
+Zoom is essential: as candidates converge near the optimum, they cluster into a tiny
+region. Without zoom the endgame is invisible. Interactive scroll-zoom (or auto-zoom
+to the bounding box of current candidates) lets you follow the final approach.
+
+Best tool: plotly (runs in browser, smooth rotation, no GUI toolkit needed) or
+pyvista for heavier 3D. Matplotlib's 3D is clunky for interactive use.
+
+**API sketch:**
+```python
+from evogine.viz import plot_landscape, plot_convergence, plot_cloud
+
+# 2-gene surface
+plot_landscape(gene_builder, fitness_function, gene_x="threshold", gene_y="alpha")
+
+# Convergence path overlaid on contour map
+plot_convergence(history, gene_builder, fitness_function,
+                 gene_x="threshold", gene_y="alpha")
+
+# 3D interactive point cloud with transparency cutoff
+plot_cloud(history, gene_builder, fitness_function,
+           gene_x="threshold", gene_y="alpha", gene_z="beta",
+           cutoff_percentile=70,   # below this = transparent
+           animate=True)           # step through generations
+```
+
+**Dependencies:** matplotlib (optional, like numpy for CMA-ES). Core library stays
+dependency-free.
+
+**Effort:** Medium. The math is straightforward; matplotlib is the main work.
+Good candidate for a separate `evogine.viz` module or even a separate package.
+
+---
+
 ## Stock Algo Use Case (personal)
 
 This engine was built to optimize trading strategy parameters (MA periods, signal thresholds, etc.) across stocks.
