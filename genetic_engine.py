@@ -280,6 +280,9 @@ class GeneticAlgorithm:
         crossover: Optional[CrossoverStrategy] = None,
         on_generation: Optional[Callable] = None,
         mode: str = 'maximize',
+        adaptive_mutation: bool = False,
+        adaptive_mutation_min: float = 0.01,
+        adaptive_mutation_max: float = 0.5,
     ):
         """
         Args:
@@ -294,6 +297,15 @@ class GeneticAlgorithm:
                 With 'minimize', your fitness function returns the value to
                 minimize directly (e.g. error, loss, drawdown) — no negation needed.
                 All reported scores (history, log, return value) are the real values.
+
+            adaptive_mutation: When True, mutation_rate adjusts automatically each
+                generation. On improvement it decreases (fine-tuning). On stagnation
+                it increases (exploring harder). Stays within [adaptive_mutation_min,
+                adaptive_mutation_max]. The mutation_rate parameter becomes the
+                starting rate.
+
+            adaptive_mutation_min: Lower bound for adaptive mutation rate (default 0.01).
+            adaptive_mutation_max: Upper bound for adaptive mutation rate (default 0.5).
         """
         if mode not in ('maximize', 'minimize'):
             raise ValueError(f"mode must be 'maximize' or 'minimize', got {mode!r}")
@@ -314,6 +326,9 @@ class GeneticAlgorithm:
         self._on_generation = on_generation
         self._mode = mode
         self._sign = -1 if mode == 'minimize' else 1
+        self._adaptive_mutation = adaptive_mutation
+        self._adaptive_mutation_min = adaptive_mutation_min
+        self._adaptive_mutation_max = adaptive_mutation_max
 
     def create_individual(self) -> dict:
         return self.genes.sample()
@@ -369,6 +384,14 @@ class GeneticAlgorithm:
             else:
                 gens_without_improvement += 1
 
+            if self._adaptive_mutation:
+                if improved:
+                    self.mutation_rate *= 0.95   # converging — fine-tune
+                else:
+                    self.mutation_rate *= 1.1    # stagnating — explore harder
+                self.mutation_rate = max(self._adaptive_mutation_min,
+                                         min(self.mutation_rate, self._adaptive_mutation_max))
+
             real_best = gen_best * self._sign
             real_avg  = gen_avg  * self._sign
 
@@ -378,6 +401,7 @@ class GeneticAlgorithm:
                 'avg_score': real_avg,
                 'improved': improved,
                 'gens_without_improvement': gens_without_improvement,
+                'mutation_rate': round(self.mutation_rate, 6),
             })
 
             print(f"[GEN {gen:05}] Best: {real_best:.11f} | Avg: {real_avg:.11f}")
@@ -463,6 +487,9 @@ class GeneticAlgorithm:
                 'min_delta': self.min_delta,
                 'use_multiprocessing': self.use_multiprocessing,
                 'mode': self._mode,
+                'adaptive_mutation': self._adaptive_mutation,
+                'adaptive_mutation_min': self._adaptive_mutation_min if self._adaptive_mutation else None,
+                'adaptive_mutation_max': self._adaptive_mutation_max if self._adaptive_mutation else None,
                 'selection': self._selection.describe(),
                 'crossover': self._crossover.describe(),
             },

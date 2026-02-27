@@ -977,6 +977,89 @@ class TestCallback:
         assert data['avg'] == [h['avg_score'] for h in history]
 
 
+class TestAdaptiveMutation:
+    def _ga(self, **kwargs):
+        genes = sphere_genes()
+        defaults = dict(
+            gene_builder=genes, fitness_function=sphere_fitness,
+            population_size=40, generations=30, mutation_rate=0.2, seed=42,
+            adaptive_mutation=True,
+        )
+        defaults.update(kwargs)
+        return GeneticAlgorithm(**defaults)
+
+    def test_mutation_rate_recorded_in_history(self):
+        ga = self._ga()
+        _, _, history = ga.run()
+        for h in history:
+            assert 'mutation_rate' in h
+            assert isinstance(h['mutation_rate'], float)
+
+    def test_rate_changes_over_time(self):
+        """Adaptive rate should not stay fixed — it must vary across generations."""
+        ga = self._ga(mutation_rate=0.2)
+        _, _, history = ga.run()
+        rates = [h['mutation_rate'] for h in history]
+        assert len(set(rates)) > 1  # rate must change at some point
+
+    def test_rate_never_below_min(self):
+        ga = self._ga(adaptive_mutation_min=0.05)
+        _, _, history = ga.run()
+        for h in history:
+            assert h['mutation_rate'] >= 0.05 - 1e-9
+
+    def test_rate_never_above_max(self):
+        ga = self._ga(adaptive_mutation_max=0.4)
+        _, _, history = ga.run()
+        for h in history:
+            assert h['mutation_rate'] <= 0.4 + 1e-9
+
+    def test_disabled_by_default(self):
+        """mutation_rate should stay fixed when adaptive_mutation=False."""
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=sphere_fitness,
+            population_size=30, generations=10, mutation_rate=0.2, seed=42,
+        )
+        _, _, history = ga.run()
+        for h in history:
+            assert h['mutation_rate'] == 0.2
+
+    def test_adaptive_still_converges(self):
+        genes = sphere_genes()
+        ga = GeneticAlgorithm(
+            gene_builder=genes, fitness_function=sphere_fitness,
+            population_size=80, generations=100, mutation_rate=0.2, seed=42,
+            adaptive_mutation=True,
+        )
+        _, score, _ = ga.run()
+        assert score > -0.5
+
+    def test_log_includes_adaptive_config(self, tmp_path):
+        log_file = str(tmp_path / "run.json")
+        ga = self._ga(
+            adaptive_mutation_min=0.02, adaptive_mutation_max=0.45,
+            log_path=log_file, generations=5,
+        )
+        ga.run()
+        import json
+        with open(log_file) as f:
+            data = json.load(f)
+        assert data['config']['adaptive_mutation'] is True
+        assert data['config']['adaptive_mutation_min'] == 0.02
+        assert data['config']['adaptive_mutation_max'] == 0.45
+
+    def test_log_history_has_mutation_rate(self, tmp_path):
+        log_file = str(tmp_path / "run.json")
+        ga = self._ga(log_path=log_file, generations=5)
+        ga.run()
+        import json
+        with open(log_file) as f:
+            data = json.load(f)
+        for entry in data['history']:
+            assert 'mutation_rate' in entry
+
+
 class TestMinimizeMode:
     def test_minimize_finds_minimum(self):
         """Minimize MSE — optimum at x=3.14, y=2.72 with error=0."""
