@@ -90,8 +90,9 @@ genes.add("fib_level",  ChoiceList([3, 5, 8, 13, 21, 34]))
 genes.add("enabled",    ChoiceList([True, False]))
 ```
 
-**Note:** ChoiceList with a single option never crashes and always returns that option — this
-was a real bug in DEAP that this library explicitly guards against.
+**Note:** ChoiceList with a single option works fine and always returns that option. An empty
+options list (`ChoiceList([])`) raises `ValueError` at construction — caught immediately,
+not at run time.
 
 ---
 
@@ -111,6 +112,8 @@ genes.add("signal_type",     ChoiceList(["rsi", "macd", "bb"]))
 ind = genes.sample()
 # → {'entry_threshold': 0.423, 'exit_window': 17, 'signal_type': 'rsi'}
 ```
+
+Duplicate gene names raise `ValueError` — each gene must have a unique name.
 
 **Custom gene types:** Subclass `GeneSpec` and implement `sample()`, `mutate()`, `describe()`.
 See the Custom Gene Types section below.
@@ -486,15 +489,21 @@ Each entry is a `dict`:
 ```python
 {
     'gen':                      int,    # generation number (1-based)
-    'best_score':               float,  # best score this generation (real value)
+    'best_score':               float,  # all-time best score seen so far (non-decreasing
+                                        # for maximize, non-increasing for minimize)
     'avg_score':                float,  # average score across the population (real value)
-    'improved':                 bool,   # did best_score set a new overall best?
+    'improved':                 bool,   # did this generation set a new overall best?
     'gens_without_improvement': int,    # consecutive gens since last improvement
     'mutation_rate':            float,  # current mutation rate (adaptive or fixed)
     'diversity':                float,  # population diversity in [0.0, 1.0]
     'restarted':                bool,   # was a stagnation restart injected this gen?
 }
 ```
+
+**`best_score` is the all-time running best**, not the current generation's best. This is
+consistent across all optimizers (GeneticAlgorithm, IslandModel, CMAESOptimizer). For
+`mode='maximize'`, `best_score` never decreases. For `mode='minimize'`, it never increases.
+This makes convergence curves monotonic and easy to plot.
 
 Scores are always real values — un-negated even in `mode='minimize'`.
 
@@ -811,6 +820,24 @@ candidates = [p for p in pareto_front if p['scores'][1] <= 0.15]
 best = max(candidates, key=lambda p: p['scores'][0])
 ```
 
+### How the NSGA-II selection works
+
+evogine uses a **(μ+λ) selection scheme**: each generation, offspring are created via
+crowding-tournament selection and crossover, then **merged with the parent population**
+before selection. This means a good parent can never be accidentally discarded — it
+survives until something better replaces it.
+
+1. **Parent selection** — two individuals are drawn at random; the one with lower
+   Pareto rank wins. If ranks are equal, the one with higher crowding distance
+   (more isolated in objective space) wins. This is *crowding-tournament selection*.
+2. **Offspring generation** — selected parents are crossed over and mutated to produce
+   λ offspring (equal to population size).
+3. **Combined pool** — parents + offspring are merged (2× population size).
+4. **Survival selection** — NSGA-II non-dominated sorting + crowding distance selects
+   the best μ individuals back down to population size.
+
+This guarantees monotonic improvement of the Pareto front across generations.
+
 ### Understanding Pareto dominance
 
 Solution A **dominates** B if:
@@ -950,6 +977,7 @@ best, score, history = opt.run()
 | `log_path` | `None` | Path to write JSON log |
 | `tolx` | `1e-8` | Stop when step size × max eigenvalue < tolx (step too small to matter) |
 | `tolfun` | `1e-10` | Stop when score range over recent history is below this (flat landscape) |
+| `on_generation` | `None` | Callback fired after each generation (see below) |
 
 ### Choosing sigma0
 
@@ -964,6 +992,32 @@ range (each gene is internally mapped to [0, 1]).
 
 If CMA-ES converges too quickly to a poor result: increase `sigma0`.
 If CMA-ES is slow to improve initially: decrease `sigma0`.
+
+### Callback for CMA-ES
+
+```python
+opt = CMAESOptimizer(
+    ...,
+    on_generation=lambda gen, best_score, avg_score, best_individual: (
+        print(f"Gen {gen}: best={best_score:.4f}  avg={avg_score:.4f}")
+    ),
+)
+```
+
+The callback receives four arguments:
+- `gen` (int) — current generation number (1-indexed)
+- `best_score` (float) — all-time best score so far (real value, un-negated)
+- `avg_score` (float) — mean score of this generation's samples (real value)
+- `best_individual` (dict) — the gene dict of the best individual found so far
+
+### Per-generation console output
+
+CMA-ES prints a status line for every generation automatically:
+
+```
+[GEN 00010] Best: 0.98420000000 | Avg: 0.97150000000 | σ: 0.243100
+[GEN 00020] Best: 0.99630000000 | Avg: 0.99480000000 | σ: 0.081200
+```
 
 ### Understanding the history
 

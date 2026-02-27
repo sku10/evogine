@@ -59,9 +59,8 @@ a complete reconstruction of the run, not a summary.
 
 ### 3. No Magic, No Drift
 
-The original motivation for building this library was that DEAP silently produced values
-outside defined gene ranges. The core promise is: **a gene defined as FloatRange(0, 1)
-will never produce a value outside [0, 1], under any circumstances.**
+The core promise is: **a gene defined as FloatRange(0, 1) will never produce a value
+outside [0, 1], under any circumstances.**
 
 More broadly: nothing should happen that the user didn't explicitly allow. No implicit
 normalization, no undocumented transformations, no silent fallbacks that change behavior.

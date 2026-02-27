@@ -2,7 +2,7 @@
 
 ## Vision
 
-Make this a **publishable, production-quality genetic algorithm library** — simpler and more controllable than DEAP, with:
+Make this a **publishable, production-quality evolutionary optimization library** with:
 - Interchangeable strategy modules (selection, crossover, mutation)
 - Rich documentation that makes it easy to pick the right mode
 - A test suite with real benchmark problems
@@ -72,7 +72,6 @@ All items below have been implemented, tested, and documented.
 **Documentation**
 - [x] README — entry point with decision guides and when-to-use advice
 - [x] features.md — full reference with tuning guide and troubleshooting checklist
-- [x] deap_comparison.md — detailed DEAP comparison with GitHub issue references
 - [x] PRINCIPLES.md — strategic vision and design principles
 
 ---
@@ -129,8 +128,8 @@ A set of standard benchmark problems with known optima — serves two purposes:
 (1) verify the library works correctly on your system before running a real problem,
 (2) compare optimizers side by side on representative problem types.
 
-**Why it matters for library selection:** A user evaluating this library vs DEAP vs
-something else can run the benchmark and see concrete numbers — not claims.
+**Why it matters for library selection:** A user evaluating optimizers can run the benchmark
+and see concrete numbers — not claims.
 "CMA-ES solved Rosenbrock in 180 evaluations, GA needed 4,200" is a decision.
 
 **Benchmark problems:**

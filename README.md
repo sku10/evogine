@@ -2,8 +2,8 @@
 
 A clean, controllable genetic algorithm library for Python.
 
-Built because existing libraries (DEAP et al.) are hard to control, leak values outside defined
-gene ranges, and require excessive boilerplate. This library stays small, readable, and predictable.
+A clean, controllable evolutionary optimization library — named genes, strict bounds,
+structured logging, and minimal boilerplate.
 
 ---
 
@@ -398,22 +398,6 @@ pytest tests/test_property.py
 
 Invariants verified: gene bounds, mutation rate zero means no change, history keys always
 present, best score never decreases, gen counter sequential, diversity in [0, 1].
-
----
-
-## Why Not DEAP?
-
-DEAP is the most widely known Python GA library but has well-documented problems:
-
-- Values drift outside defined gene ranges (the original reason this library was built)
-- Global mutable state (`creator.create`) breaks distributed computing and notebooks
-- No named genes — individuals are anonymous lists
-- No early stopping, no history, no structured logging, no callback API
-- No minimize mode — always maximize, users must negate manually
-- ~8000 lines, 30–50 lines of boilerplate before any EA logic
-- 237 open issues, DEAP 2.0 stalled at ~27% since roughly 2014
-
-See [deap_comparison.md](deap_comparison.md) for a full breakdown with GitHub issue references.
 
 ---
 
