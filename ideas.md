@@ -343,6 +343,239 @@ Good candidate for a separate `evogine.viz` module or even a separate package.
 
 ---
 
+## Research-Backed Future Ideas
+
+State-of-the-art findings from evolutionary computation research (2022–2026).
+Prioritized by practical impact and fit with evogine's architecture.
+
+---
+
+### Differential Evolution (DE) Optimizer
+
+**What:** Population-based optimizer for float-only problems that generates trial vectors
+via `v = x_r1 + F * (x_r2 - x_r3)` — no covariance matrix, lower memory than CMA-ES.
+
+**Why add it:** CMA-ES and DE have complementary strengths.
+- CMA-ES wins on **non-separable** functions (correlated variables)
+- DE wins on **separable** functions (independent variables)
+Together they cover continuous optimization completely.
+
+**Best variant to implement: SHADE** (Success-History based Adaptive DE, CEC competition
+winner). Maintains a memory of successful scale factor (F) and crossover rate (CR) values,
+samples new values from distributions centered on historical successes. Zero tuning required.
+L-SHADE adds linear population size reduction (large early, tiny late) — explore then exploit.
+
+**API:** Same shape as `CMAESOptimizer`: `DEOptimizer(gene_builder, fitness_function, ...)`.
+FloatRange-only like CMA-ES.
+
+**Effort:** Medium. The core loop is simpler than CMA-ES (no eigendecomposition).
+
+---
+
+### NSGA-III (Many-Objective Optimization)
+
+**What:** Extends NSGA-II for 4+ objectives. Replaces crowding distance with
+reference-point-based niching — uniformly distributed reference points guide diversity
+along the Pareto front. NSGA-II's crowding distance degrades badly above 3 objectives.
+
+**Why add it:** NSGA-II is the standard for 2–3 objectives. NSGA-III is the expected
+successor for engineering problems with many objectives. `pymoo` has a reference
+implementation to study.
+
+**API:** Same as `MultiObjectiveGA` — just a new `algorithm='nsga3'` parameter, or a
+separate `ManyObjectiveGA` class.
+
+**Effort:** Medium. The reference point generation (Das-Dennis procedure) is the main
+new piece; the rest reuses existing NSGA-II scaffolding.
+
+---
+
+### Constraint Handling
+
+**What:** Support for user-defined constraints (equality and inequality). Currently
+evogine has no explicit constraint support — users must encode constraints as fitness
+penalties manually.
+
+**Best approach: Deb's Feasibility Rules** — zero tuning required:
+1. Feasible solution always beats infeasible
+2. Between two infeasible: prefer lower total constraint violation
+3. Between two feasible: use fitness normally
+
+**API:**
+```python
+ga = GeneticAlgorithm(
+    ...,
+    constraints=[
+        lambda ind: ind['x'] + ind['y'] <= 10,   # must be True to be feasible
+        lambda ind: ind['z'] >= 0,
+    ],
+)
+```
+
+**Why this matters:** No published GA library can be seriously recommended for
+real-world engineering without constraint support. This is table-stakes for credibility.
+
+**Effort:** Small-medium. Deb's rules slot into selection logic with no architecture changes.
+
+---
+
+### MAP-Elites (Quality-Diversity)
+
+**What:** Instead of finding one optimal solution, find the best solution *for each
+region of a behavior space*. Output is a filled archive — a grid mapping behavioral
+descriptors to their elite performers.
+
+Example: optimizing a robot gait. One cell = (speed=fast, stability=high). Another cell
+= (speed=slow, stability=very high). MAP-Elites fills all cells simultaneously. Useful
+any time you want a diverse set of high-quality solutions rather than one winner.
+
+**Algorithm:**
+1. User defines a behavior descriptor function (maps individual → 2D or ND coordinates)
+2. Grid of cells, each stores the best individual with that behavior signature
+3. Select a random occupied cell, mutate its individual, insert into appropriate cell if better
+4. Repeat
+
+**API:**
+```python
+from evogine import MAPElites
+
+opt = MAPElites(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    behavior_fn      = lambda ind: (ind['speed'], ind['energy']),  # user-supplied
+    grid_shape       = (20, 20),
+    generations      = 500,
+)
+archive = opt.run()  # returns filled grid: {(i,j): {'individual': ..., 'score': ...}}
+```
+
+**Why add it:** Genuinely novel feature — no clean equivalent in any major Python GA
+library. Increasingly used in robotics, game AI, materials design, drug discovery.
+Differentiator that sets evogine apart from the crowd.
+
+**Effort:** Medium. The algorithm itself is simpler than NSGA-II; the main work is the
+archive data structure and behavior space discretization.
+
+---
+
+### Fitness Landscape Analysis
+
+**What:** Analyze the structure of a fitness function before optimization — detect
+ruggedness, neutrality, modality — and recommend which optimizer fits the problem.
+
+**How:** Random walk sampling + nearest-neighbor analysis. No need to know the optimum.
+
+**API:**
+```python
+from evogine import landscape_analysis
+
+report = landscape_analysis(gene_builder, fitness_function, n_samples=1000)
+# report: {
+#   'ruggedness': 0.72,       # 0=smooth, 1=jagged
+#   'neutrality': 0.15,       # fraction of equal-fitness neighbors
+#   'estimated_modes': 3,     # number of distinct basins found
+#   'recommendation': 'IslandModel',
+#   'reason': 'High ruggedness and multimodal structure detected',
+# }
+```
+
+**Why add it:** Directly supports the Optimizer Auto-Selection Tool idea. Standalone it
+helps users understand their problem before running a long optimization. No major
+dependencies — just random sampling and distance calculations.
+
+**Effort:** Small-medium. The sampling loop is simple; the analysis metrics take some
+research to implement correctly.
+
+---
+
+### LLM as Evolutionary Operator
+
+**What:** Use an LLM as a crossover/mutation operator. The LLM receives descriptions of
+parent individuals (as text or JSON) and generates a new offspring by "reasoning" about
+which combination makes sense. Published as *EvoPrompt* (ICLR 2024) and *LLaMEA*
+(IEEE TEVC Jan 2025).
+
+**Why it's interesting:** LLM operators understand semantic structure that binary
+operators cannot. For discrete/symbolic problems (prompts, configurations, code
+parameters) where recombining at the bit level is meaningless, an LLM that understands
+"what this gene represents" can generate smarter offspring.
+
+**API:**
+```python
+ga = GeneticAlgorithm(
+    ...,
+    crossover = LLMCrossover(
+        llm_fn=lambda parent1, parent2: my_llm_api(parent1, parent2),
+    ),
+)
+```
+
+**Practical scope:** Only useful for expensive fitness functions (the LLM call overhead
+must be small relative to evaluation cost). Forward-looking feature for the AI-native use case.
+
+**Effort:** Small (the integration is a callback wrapper). The LLM API is the user's problem.
+
+---
+
+### SHADE Parameter Adaptation (for DE and GA)
+
+**What:** Success-History based Adaptation — maintains a memory of historically
+successful parameter values (mutation rate, crossover rate), samples new values from
+distributions centered on past successes. Dominant technique in CEC competition winners
+2013–2024.
+
+**For evogine:** Could replace or augment the current stagnation-based adaptive mutation
+in `GeneticAlgorithm`. The "success history" approach is more principled — it adapts
+based on what *actually worked*, not just whether improvement happened.
+
+**Effort:** Small-medium. Can be implemented as an optional `AdaptationStrategy` plug-in.
+
+---
+
+### Levy Flight Mutation
+
+**What:** Heavy-tailed probability distribution for mutation jumps. Instead of Gaussian
+(bounded steps), Levy flight allows occasional very large jumps (global exploration) with
+frequent small steps (local exploitation). Used in many recent nature-inspired algorithms.
+
+**Why add it:** Simple addition to the existing mutation system — just an alternative
+distribution alongside Gaussian. Useful for escaping local optima on multimodal landscapes.
+
+**API:** `FloatRange(0, 1, mutation='levy')` — one extra parameter.
+
+**Effort:** Very small. `scipy.stats.levy` or a simple pure-Python approximation.
+
+---
+
+### Island Model Topology Options
+
+**What:** Currently ring topology (each island talks to its two neighbors). Research shows
+topology matters significantly:
+- **Ring:** Good default, maintains diversity
+- **Fully connected:** Fast convergence, less diversity
+- **Star:** One hub island receives and redistributes migrants
+- **Dynamic / spectral:** Islands with similar gene distributions communicate;
+  divergent islands stay isolated. Maintains diversity best of all.
+
+**API:** `IslandModel(..., topology='ring' | 'fully_connected' | 'star')`
+
+**Effort:** Small. Topology is just a mapping of which islands send to which.
+
+---
+
+### Linear Population Size Reduction
+
+**What:** Start with a large population (diverse exploration), shrink it linearly to a
+small population (focused exploitation) over the run. Used in L-SHADE. Simple but
+effective — matches population size to the phase of search.
+
+**API:** `GeneticAlgorithm(..., linear_pop_reduction=True)` — population shrinks from
+`population_size` to a small minimum (e.g., 4) over the course of `generations`.
+
+**Effort:** Very small. One line of math per generation.
+
+---
+
 ## Stock Algo Use Case (personal)
 
 This engine was built to optimize trading strategy parameters (MA periods, signal thresholds, etc.) across stocks.
