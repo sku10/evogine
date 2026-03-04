@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import GeneBuilder
 from .operators import SelectionStrategy, CrossoverStrategy, RouletteSelection, UniformCrossover
 
@@ -13,6 +13,9 @@ from .operators import SelectionStrategy, CrossoverStrategy, RouletteSelection, 
 class IslandModel:
     """
     Multiple independent GA sub-populations (islands) with periodic migration.
+
+    The on_generation callback may return a dict of parameter overrides.
+    Steerable keys: mutation_rate, crossover_rate, elitism, migration_interval, migration_size.
 
     Each island evolves independently. Every migration_interval generations,
     the top migration_size individuals from each island migrate to neighbouring
@@ -31,6 +34,15 @@ class IslandModel:
         history:         Per-generation dicts with island_bests list.
     """
 
+    _STEERABLE_KEYS = {'mutation_rate', 'crossover_rate', 'elitism', 'migration_interval', 'migration_size'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -44,6 +56,7 @@ class IslandModel:
         crossover_rate: float = 0.5,
         elitism: int = 2,
         use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
         seed: Optional[int] = None,
         patience: Optional[int] = None,
         min_delta: float = 1e-6,
@@ -71,6 +84,7 @@ class IslandModel:
         self.crossover_rate = crossover_rate
         self.elitism = elitism
         self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
         self._seed = seed
         self.patience = patience
         self.min_delta = min_delta
@@ -81,6 +95,20 @@ class IslandModel:
         self.log_path = log_path
         self._on_generation = on_generation
         self._topology = topology
+        self._pool = None
+
+    def _diagnose_generation(self, island_bests, improved, gens_without_improvement):
+        if len(island_bests) > 1:
+            mean_best = sum(island_bests) / len(island_bests)
+            if mean_best != 0 and all(
+                abs(b - mean_best) / max(abs(mean_best), 1e-300) < 0.01 for b in island_bests
+            ):
+                return 'islands_converged', 'Increase migration_interval or try star topology'
+        if improved:
+            return 'improving', 'No changes needed'
+        if gens_without_improvement > 10:
+            return 'stagnating', 'Increase migration_size or mutation_rate'
+        return 'stable', 'No changes needed'
 
     def _get_migration_pairs(self) -> list[tuple[int, int]]:
         """Return (source, destination) island index pairs for the current topology."""
@@ -102,9 +130,8 @@ class IslandModel:
         return pairs
 
     def _evaluate_population(self, population: list[dict]) -> list[tuple[dict, float]]:
-        if self.use_multiprocessing:
-            with mp.Pool(mp.cpu_count()) as pool:
-                fitnesses = pool.map(self.fitness_function, population)
+        if self._pool is not None:
+            fitnesses = self._pool.map(self.fitness_function, population)
         else:
             fitnesses = [self.fitness_function(ind) for ind in population]
         if self._mode == 'minimize':
@@ -155,6 +182,8 @@ class IslandModel:
         gens_without_improvement = 0
         convergence_gen = None
 
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
         for gen in range(1, self.generations + 1):
             all_island_scored: list[list[tuple[dict, float]]] = []
             for i in range(self.n_islands):
@@ -185,6 +214,10 @@ class IslandModel:
             running_best_real = best_score * self._sign
             real_avg = gen_avg_sc * self._sign
 
+            diagnosis, recommendation = self._diagnose_generation(
+                island_bests, improved, gens_without_improvement,
+            )
+
             history.append({
                 'gen': gen,
                 'best_score': running_best_real,
@@ -192,6 +225,8 @@ class IslandModel:
                 'island_bests': island_bests,
                 'improved': improved,
                 'gens_without_improvement': gens_without_improvement,
+                'diagnosis': diagnosis,
+                'recommendation': recommendation,
             })
 
             print(
@@ -200,7 +235,8 @@ class IslandModel:
             )
 
             if self._on_generation is not None:
-                self._on_generation(gen, running_best_real, real_avg, best_overall)
+                result = self._on_generation(gen, running_best_real, real_avg, best_overall)
+                self._apply_steering(result)
 
             if self.patience is not None and gens_without_improvement >= self.patience:
                 print(f"[EARLY STOP] No improvement for {self.patience} generations.")
@@ -234,6 +270,11 @@ class IslandModel:
                     f"[MIGRATION] Gen {gen}: "
                     f"{self.migration_size} migrants, topology={self._topology}"
                 )
+
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
 
         elapsed = time.time() - t_start
         early_stopped = (
@@ -280,6 +321,8 @@ class IslandModel:
                 'patience': self.patience,
                 'min_delta': self.min_delta,
                 'mode': self._mode,
+                'use_multiprocessing': self.use_multiprocessing,
+                'workers': self._workers,
                 'selection': self._selection.describe(),
                 'crossover': self._crossover.describe(),
             },

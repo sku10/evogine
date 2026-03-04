@@ -1,5 +1,5 @@
 """
-Tests for evogine.py
+Tests for evogine
 
 Covers:
 - Gene types: FloatRange, IntRange, ChoiceList

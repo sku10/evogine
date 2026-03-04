@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import GeneBuilder
 from .operators import CrossoverStrategy, UniformCrossover
 
@@ -13,6 +13,9 @@ from .operators import CrossoverStrategy, UniformCrossover
 class MultiObjectiveGA:
     """
     Multi-objective genetic algorithm supporting NSGA-II and NSGA-III.
+
+    The on_generation callback may return a dict of parameter overrides.
+    Steerable keys: mutation_rate, crossover_rate, patience.
 
     Fitness function must return a list/tuple of floats — one per objective.
     Each objective can be independently maximized or minimized.
@@ -39,6 +42,15 @@ class MultiObjectiveGA:
             gen, pareto_size, hypervolume_proxy, improved, gens_without_improvement
     """
 
+    _STEERABLE_KEYS = {'mutation_rate', 'crossover_rate', 'patience'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -50,6 +62,7 @@ class MultiObjectiveGA:
         mutation_rate: float = 0.1,
         crossover_rate: float = 0.5,
         use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
         seed: Optional[int] = None,
         patience: Optional[int] = None,
         min_delta: float = 1e-6,
@@ -84,6 +97,7 @@ class MultiObjectiveGA:
         self.mutation_rate = mutation_rate
         self.crossover_rate = crossover_rate
         self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
         self._seed = seed
         self.patience = patience
         self.min_delta = min_delta
@@ -91,6 +105,7 @@ class MultiObjectiveGA:
         self.log_path = log_path
         self._on_generation = on_generation
         self._algorithm = algorithm
+        self._pool = None
 
         if algorithm == 'nsga3':
             if reference_points is not None:
@@ -100,6 +115,15 @@ class MultiObjectiveGA:
                 self._ref_points = self._generate_reference_points(n_objectives, divs)
         else:
             self._ref_points = []
+
+    def _diagnose_generation(self, pareto_size, improved):
+        if pareto_size == self.population_size:
+            return 'front_saturated', 'All solutions non-dominated; increase population_size'
+        if pareto_size == 1:
+            return 'single_optimum', 'Front not spreading; check objective independence'
+        if improved:
+            return 'improving', 'No changes needed'
+        return 'stable', 'No changes needed'
 
     # ------------------------------------------------------------------
     # NSGA-III reference point utilities
@@ -125,6 +149,8 @@ class MultiObjectiveGA:
     ) -> dict[int, list[int]]:
         """Associate each individual in front_indices to nearest reference point."""
         all_indices = list(already_selected_indices) + list(front_indices)
+        if not all_indices:
+            return {r: [] for r in range(len(self._ref_points))}
         all_scores = [scored[i][1] for i in all_indices]
         n_obj = self.n_objectives
         ideal = [max(s[j] for s in all_scores) for j in range(n_obj)]
@@ -186,9 +212,8 @@ class MultiObjectiveGA:
 
     def _evaluate(self, population: list[dict]) -> list[list[float]]:
         """Evaluate population. Returns sign-adjusted score vectors."""
-        if self.use_multiprocessing:
-            with mp.Pool(mp.cpu_count()) as pool:
-                raw = pool.map(self.fitness_function, population)
+        if self._pool is not None:
+            raw = self._pool.map(self.fitness_function, population)
         else:
             raw = [self.fitness_function(ind) for ind in population]
         return [
@@ -334,6 +359,8 @@ class MultiObjectiveGA:
         best_hypervolume = float('-inf')
         gens_without_improvement = 0
 
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
         for gen in range(1, self.generations + 1):
             score_vecs = self._evaluate(population)
             scored = list(zip(population, score_vecs))
@@ -368,12 +395,16 @@ class MultiObjectiveGA:
                 for i in front_0
             ]
 
+            diagnosis, recommendation = self._diagnose_generation(pareto_size, improved)
+
             history.append({
                 'gen': gen,
                 'pareto_size': pareto_size,
                 'hypervolume_proxy': round(hv_proxy, 8),
                 'improved': improved,
                 'gens_without_improvement': gens_without_improvement,
+                'diagnosis': diagnosis,
+                'recommendation': recommendation,
             })
 
             print(
@@ -382,7 +413,8 @@ class MultiObjectiveGA:
             )
 
             if self._on_generation is not None:
-                self._on_generation(gen, pareto_size, hv_proxy, pareto_front_real)
+                result = self._on_generation(gen, pareto_size, hv_proxy, pareto_front_real)
+                self._apply_steering(result)
 
             if self.patience is not None and gens_without_improvement >= self.patience:
                 print(f"[EARLY STOP] No improvement for {self.patience} generations.")
@@ -430,6 +462,11 @@ class MultiObjectiveGA:
             for i in final_front_0
         ]
 
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
+
         elapsed = time.time() - t_start
         if self.log_path:
             self._write_log(final_pareto, history, elapsed)
@@ -460,6 +497,7 @@ class MultiObjectiveGA:
                 'patience': self.patience,
                 'min_delta': self.min_delta,
                 'use_multiprocessing': self.use_multiprocessing,
+                'workers': self._workers,
                 'crossover': self._crossover.describe(),
             },
             'genes': self.genes.describe(),

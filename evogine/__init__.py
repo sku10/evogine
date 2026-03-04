@@ -1,3 +1,5 @@
+__version__ = "0.1.0"
+
 from ._utils import _seed_all
 from .genes import GeneSpec, FloatRange, IntRange, ChoiceList, GeneBuilder
 from .operators import (

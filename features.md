@@ -169,6 +169,7 @@ ga = GeneticAlgorithm(
     crossover_rate      = 0.5,           # probability of crossover vs. direct clone
     elitism             = 2,             # top N copied unchanged to next generation
     use_multiprocessing = False,         # parallel fitness via multiprocessing.Pool
+    workers             = None,          # worker count: int, 0=all, -N=cpu_count-N
     seed                = 42,            # random seed for reproducibility
     patience            = 20,            # early stop after N gens with no improvement
     min_delta           = 1e-6,          # minimum score change to count as improvement
@@ -663,7 +664,7 @@ plt.tight_layout(); plt.show()
 
 ---
 
-## Callback Hook
+## Callback Hook & Steering Interface
 
 Called after every generation. Use for live plots, progress bars, custom logging,
 or triggering external actions.
@@ -679,6 +680,33 @@ ga = GeneticAlgorithm(..., on_generation=on_gen)
 - Fires on every generation, including the last one before early stopping
 - `best_individual` is the best seen so far across all generations, not just this gen
 - Runs synchronously (blocking) — keep it fast or use a background thread for heavy work
+
+### Steering (runtime parameter overrides)
+
+If the `on_generation` callback returns a `dict`, recognized keys are applied as
+parameter overrides for the next generation. Return `None` (or nothing) for no change.
+
+```python
+def steer(gen, best_score, avg_score, best_ind):
+    if avg_score < 0.5 and gen > 10:
+        return {'mutation_rate': 0.3}   # explore more
+    return None                          # no change
+
+ga = GeneticAlgorithm(..., on_generation=steer)
+```
+
+Steerable keys per optimizer:
+
+| Optimizer | Steerable keys |
+|---|---|
+| `GeneticAlgorithm` | `mutation_rate`, `crossover_rate`, `elitism`, `patience` |
+| `IslandModel` | `mutation_rate`, `crossover_rate`, `elitism`, `migration_interval`, `migration_size` |
+| `DEOptimizer` | `strategy` (`'current_to_best'`/`'rand1'`), `patience`, `min_delta` |
+| `CMAESOptimizer` | `patience`, `min_delta`, `tolx`, `tolfun` |
+| `MultiObjectiveGA` | `mutation_rate`, `crossover_rate`, `patience` |
+| `MAPElites` | `mutation_rate` |
+
+Unknown keys are silently ignored. Invalid values for `strategy` in DE are also ignored.
 
 **Live plot example:** See `examples/live_plot.py` for a two-panel real-time visualization
 using matplotlib.
@@ -737,6 +765,49 @@ If the checkpoint saved gen 80, the resumed run will execute gens 81–200.
 
 **When to use:** Any run where a single generation takes more than a second. For stock
 backtests across many tickers, a crash can mean hours of lost work. Always use checkpoints.
+
+### `from_checkpoint()` classmethod
+
+Create a ready-to-resume `GeneticAlgorithm` from a checkpoint file. Useful for AI agents
+that read a log, decide to continue with different parameters, and want a one-liner:
+
+```python
+ga = GeneticAlgorithm.from_checkpoint(
+    'checkpoint.json',
+    gene_builder=genes,
+    fitness_function=fitness,
+    generations=100,        # override: run longer
+    mutation_rate=0.2,      # override: explore more
+)
+best, score, history = ga.run()
+```
+
+Values from the checkpoint (`mode`, `seed`, `generations`) are used as defaults.
+Any `GeneticAlgorithm.__init__` kwarg can be passed as an override.
+
+---
+
+## Per-Generation Diagnosis
+
+Every history entry includes `diagnosis` and `recommendation` strings — machine-readable
+labels that tell an AI agent (or human) what's happening and what to do about it.
+
+```python
+_, _, history = ga.run()
+for h in history[-5:]:
+    print(f"Gen {h['gen']:3d} | {h['diagnosis']:25s} | {h['recommendation']}")
+```
+
+Each optimizer produces its own set of diagnosis labels based on its internal state.
+See [AGENT_GUIDE.md](AGENT_GUIDE.md) for the complete diagnosis table per optimizer.
+
+Common diagnoses across all optimizers:
+- `improving` — score improved this generation; no action needed
+- `stable` — normal operation, no concerns
+
+Optimizer-specific diagnoses include `low_diversity`, `random_walk`, `islands_converged`,
+`F_collapsed`, `sigma_collapsed`, `front_saturated`, `archive_stagnant`, and more.
+The `recommendation` string provides a concrete next step.
 
 ---
 
@@ -818,11 +889,53 @@ Seed is applied at the **start of `run()`**, not at construction. This means:
 
 ## Multiprocessing
 
+All six optimizers support parallel fitness evaluation via `multiprocessing.Pool`.
+
+### Quick start
+
 ```python
+# Use all CPU cores (backward compatible)
 ga = GeneticAlgorithm(..., use_multiprocessing=True)
+
+# Use exactly 4 workers
+ga = GeneticAlgorithm(..., workers=4)
+
+# Use all cores except one (leave headroom for the main process)
+ga = GeneticAlgorithm(..., workers=-1)
+
+# Use all cores (explicit)
+ga = GeneticAlgorithm(..., workers=0)
 ```
 
-Evaluates the fitness function across all available CPU cores using `multiprocessing.Pool`.
+The `workers` parameter is available on all six optimizers:
+
+```python
+ga    = GeneticAlgorithm(..., workers=4)
+im    = IslandModel(..., workers=-1)
+mo    = MultiObjectiveGA(..., workers=0)
+de    = DEOptimizer(..., workers=2)
+cmaes = CMAESOptimizer(..., workers=-2)
+me    = MAPElites(..., workers=4, batch_size=20)
+```
+
+### `workers` resolution
+
+| `workers` | `use_multiprocessing` | Result |
+|---|---|---|
+| `None` | `False` | No pool (sequential) |
+| `None` | `True` | `cpu_count()` — all cores (backward compat) |
+| `0` | any | `cpu_count()` — all cores |
+| `4` | any | `min(4, cpu_count())` |
+| `-1` | any | `max(1, cpu_count() - 1)` |
+| `-2` | any | `max(1, cpu_count() - 2)` |
+
+When `workers` is set (not `None`), it implies multiprocessing — `use_multiprocessing`
+is ignored. The pool is created once per `run()` call and reused for all generations —
+no per-generation overhead.
+
+For MAPElites, the `batch_size` parameter controls how many children are generated and
+evaluated per generation (default 1). With multiprocessing, higher batch sizes give better
+parallelism.
 
 **Requirements:**
 - Fitness function must be defined at **module level** — not a lambda, not a nested function,
@@ -1129,6 +1242,7 @@ opt = CMAESOptimizer(
     mode             = 'maximize',
     seed             = 42,
     log_path         = "cmaes_run.json",
+    use_multiprocessing = False,
 )
 
 best, score, history = opt.run()
@@ -1152,6 +1266,8 @@ best, score, history = opt.run()
 | `tolx` | `1e-8` | Stop when step size × max eigenvalue < tolx (step too small to matter) |
 | `tolfun` | `1e-10` | Stop when score range over recent history is below this (flat landscape) |
 | `on_generation` | `None` | Callback fired after each generation (see below) |
+| `use_multiprocessing` | `False` | Parallel fitness evaluation via `multiprocessing.Pool` |
+| `workers` | `None` | Worker count: positive=exact, 0=all cores, negative=cpu_count-N |
 
 ### Choosing sigma0
 
@@ -1289,11 +1405,12 @@ opt = DEOptimizer(
     memory_size           = 6,                 # SHADE history size H
     linear_pop_reduction  = False,             # True = L-SHADE variant
     patience              = None,
-    min_delta             = 1e-6,
+    min_delta             = 1e-9,
     mode                  = 'maximize',
     seed                  = None,
     log_path              = None,
     on_generation         = None,              # fn(gen, best_score, avg_score, best_ind)
+    use_multiprocessing   = False,
 )
 
 best, score, history = opt.run()
@@ -1311,11 +1428,13 @@ best, score, history = opt.run()
 | `memory_size` | `6` | SHADE history archive size H |
 | `linear_pop_reduction` | `False` | L-SHADE: shrink pop from `population_size` to 4 |
 | `patience` | `None` | Stop after N gens without improvement |
-| `min_delta` | `1e-6` | Minimum improvement to reset patience |
+| `min_delta` | `1e-9` | Minimum improvement to reset patience |
 | `mode` | `'maximize'` | `'maximize'` or `'minimize'` |
 | `seed` | `None` | Random seed |
 | `log_path` | `None` | Path for JSON log |
 | `on_generation` | `None` | Callback `fn(gen, best_score, avg_score, best_ind)` |
+| `use_multiprocessing` | `False` | Parallel fitness evaluation via `multiprocessing.Pool` |
+| `workers` | `None` | Worker count: positive=exact, 0=all cores, negative=cpu_count-N |
 
 ### Mutation strategies
 
@@ -1417,6 +1536,8 @@ me = MAPElites(
     seed               = None,
     log_path           = None,
     on_generation      = None,         # fn(gen, archive_size, best_score, coverage)
+    use_multiprocessing = False,
+    batch_size         = 1,           # children per generation (higher = better parallelism)
 )
 
 archive, history = me.run()
@@ -1456,6 +1577,9 @@ every cell will have the same type of solution.
 | `seed` | `None` | Random seed |
 | `log_path` | `None` | Path for JSON log |
 | `on_generation` | `None` | Callback `fn(gen, archive_size, best_score, coverage)` |
+| `use_multiprocessing` | `False` | Parallel fitness evaluation via `multiprocessing.Pool` |
+| `workers` | `None` | Worker count: positive=exact, 0=all cores, negative=cpu_count-N |
+| `batch_size` | `1` | Children per generation. Higher values improve parallelism with multiprocessing |
 
 ### Return value
 

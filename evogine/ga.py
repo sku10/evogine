@@ -6,12 +6,21 @@ import os
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import FloatRange, IntRange, ChoiceList, GeneBuilder
 from .operators import SelectionStrategy, CrossoverStrategy, RouletteSelection, UniformCrossover
 
 
 class GeneticAlgorithm:
+    _STEERABLE_KEYS = {'mutation_rate', 'crossover_rate', 'elitism', 'patience'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -22,6 +31,7 @@ class GeneticAlgorithm:
         crossover_rate: float = 0.5,
         elitism: int = 2,
         use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
         seed: Optional[int] = None,
         patience: Optional[int] = None,
         min_delta: float = 1e-6,
@@ -65,7 +75,9 @@ class GeneticAlgorithm:
                   Elites are always preserved. Only non-elite slots are replaced.
 
             on_generation: Callback called after each generation.
-                  Signature: fn(gen, best_score, avg_score, best_individual) -> None
+                  Signature: fn(gen, best_score, avg_score, best_individual) -> None or dict
+                  If the callback returns a dict, recognized keys are applied as
+                  parameter overrides: mutation_rate, crossover_rate, elitism, patience.
 
             adaptive_mutation_min: Lower bound for adaptive mutation rate (default 0.01).
             adaptive_mutation_max: Upper bound for adaptive mutation rate (default 0.5).
@@ -91,6 +103,7 @@ class GeneticAlgorithm:
         self.crossover_rate = crossover_rate
         self.elitism = elitism
         self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
         self.patience = patience
         self.min_delta = min_delta
         self.log_path = log_path
@@ -110,6 +123,40 @@ class GeneticAlgorithm:
         self._linear_pop_reduction = linear_pop_reduction
         self._min_population = max(2, min_population)
         self._constraints = constraints or []
+        self._resume_path = None
+        self._pool = None
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        gene_builder: GeneBuilder,
+        fitness_function: Callable[[dict], float],
+        **overrides,
+    ) -> 'GeneticAlgorithm':
+        """Create a GeneticAlgorithm ready to resume from a checkpoint file.
+
+        Any keyword argument accepted by GeneticAlgorithm.__init__ can be passed
+        as an override. Values from the checkpoint (mode, seed, generations) are
+        used as defaults but can be overridden.
+        """
+        with open(checkpoint_path, encoding='utf-8') as f:
+            ckpt = json.load(f)
+
+        config = ckpt.get('config', {})
+        kwargs = {
+            'gene_builder': gene_builder,
+            'fitness_function': fitness_function,
+            'mode': config.get('mode', 'maximize'),
+            'seed': config.get('seed'),
+            'generations': config.get('generations', 50),
+            'checkpoint_path': checkpoint_path,
+        }
+        kwargs.update(overrides)
+
+        instance = cls(**kwargs)
+        instance._resume_path = checkpoint_path
+        return instance
 
     def create_individual(self) -> dict:
         return self.genes.sample()
@@ -124,9 +171,8 @@ class GeneticAlgorithm:
         return sum(1 for fn in self._constraints if not fn(ind))
 
     def evaluate_population(self, population: list[dict]) -> list[tuple[dict, float]]:
-        if self.use_multiprocessing:
-            with mp.Pool(mp.cpu_count()) as pool:
-                fitnesses = pool.map(self.fitness_function, population)
+        if self._pool is not None:
+            fitnesses = self._pool.map(self.fitness_function, population)
         else:
             fitnesses = [self.fitness_function(ind) for ind in population]
         if self._mode == 'minimize':
@@ -165,6 +211,19 @@ class GeneticAlgorithm:
                     unique_fraction = len(set(str(v) for v in values)) / len(spec.options)
                     diversities.append(min(1.0, unique_fraction))
         return round(sum(diversities) / len(diversities), 6) if diversities else 0.0
+
+    def _diagnose_generation(self, diversity, improved, restarted, gens_without_improvement):
+        if restarted:
+            return 'population_restarted', 'Restart injected fresh individuals'
+        if diversity < 0.05:
+            return 'low_diversity', 'Increase mutation_rate or enable restart_after'
+        if diversity > 0.8 and gens_without_improvement >= 5:
+            return 'random_walk', 'Decrease mutation_rate or increase population_size'
+        if improved:
+            return 'improving', 'No changes needed'
+        if self.patience is not None and gens_without_improvement > self.patience * 0.5:
+            return 'approaching_stagnation', 'Consider increasing mutation_rate'
+        return 'stable', 'No changes needed'
 
     def _save_checkpoint(
         self,
@@ -217,10 +276,14 @@ class GeneticAlgorithm:
             history:         list of dicts per generation with keys:
                                gen, best_score, avg_score, improved,
                                gens_without_improvement, mutation_rate,
-                               diversity, restarted
+                               diversity, restarted, diagnosis, recommendation
         """
         _seed_all(self._seed)
         t_start = time.time()
+
+        if resume_from is None and self._resume_path is not None:
+            resume_from = self._resume_path
+            self._resume_path = None
 
         if resume_from is not None:
             state = self._load_checkpoint(resume_from)
@@ -242,6 +305,8 @@ class GeneticAlgorithm:
             convergence_gen = None
             start_gen = 1
 
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
         for gen in range(start_gen, self.generations + 1):
             scored = self.evaluate_population(population)
             scored.sort(key=lambda x: -x[1])
@@ -278,6 +343,10 @@ class GeneticAlgorithm:
                 and gens_without_improvement % self._restart_after == 0
             )
 
+            diagnosis, recommendation = self._diagnose_generation(
+                diversity, improved, restarted, gens_without_improvement,
+            )
+
             history.append({
                 'gen': gen,
                 'best_score': running_best_real,
@@ -287,12 +356,15 @@ class GeneticAlgorithm:
                 'mutation_rate': round(self.mutation_rate, 6),
                 'diversity': diversity,
                 'restarted': restarted,
+                'diagnosis': diagnosis,
+                'recommendation': recommendation,
             })
 
             print(f"[GEN {gen:05}] Best: {running_best_real:.11f} | Avg: {real_avg:.11f} | Diversity: {diversity:.4f}")
 
             if self._on_generation is not None:
-                self._on_generation(gen, running_best_real, real_avg, best_overall)
+                result = self._on_generation(gen, running_best_real, real_avg, best_overall)
+                self._apply_steering(result)
 
             if (
                 self._checkpoint_path is not None
@@ -343,6 +415,11 @@ class GeneticAlgorithm:
                 next_gen.append(child)
 
             population = next_gen
+
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
 
         elapsed = time.time() - t_start
         early_stopped = (
@@ -403,6 +480,7 @@ class GeneticAlgorithm:
                 'patience': self.patience,
                 'min_delta': self.min_delta,
                 'use_multiprocessing': self.use_multiprocessing,
+                'workers': self._workers,
                 'mode': self._mode,
                 'adaptive_mutation': self._adaptive_mutation,
                 'adaptive_mutation_min': self._adaptive_mutation_min if self._adaptive_mutation else None,

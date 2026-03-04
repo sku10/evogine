@@ -344,3 +344,50 @@ class TestDominatesHelper:
         ]
         fronts = ga._non_dominated_sort(scored)
         assert len(fronts[0]) == 2
+
+
+class TestNSGA3SmallPopulation:
+    """NSGA-III must not crash when population_size < number of reference points."""
+
+    def test_nsga3_pop_smaller_than_ref_points(self):
+        """3 objectives, divisions=6 → 28 ref points. Pop=6 must work."""
+        genes = sphere_genes()
+
+        def fitness(ind):
+            return [ind['x'], -ind['y'], ind['x'] + ind['y']]
+
+        ga = MultiObjectiveGA(
+            gene_builder=genes,
+            fitness_function=fitness,
+            n_objectives=3,
+            objectives=['maximize', 'maximize', 'maximize'],
+            algorithm='nsga3',
+            reference_point_divisions=6,
+            population_size=6,
+            generations=5,
+            seed=42,
+        )
+        pareto, history = ga.run()
+        assert len(pareto) > 0
+        assert len(history) == 5
+
+    def test_nsga3_minimal_population(self):
+        """Pop=4 with 3 objectives — extreme edge case."""
+        genes = sphere_genes()
+
+        def fitness(ind):
+            return [ind['x'], ind['y'], -(ind['x'] ** 2 + ind['y'] ** 2)]
+
+        ga = MultiObjectiveGA(
+            gene_builder=genes,
+            fitness_function=fitness,
+            n_objectives=3,
+            objectives=['maximize', 'maximize', 'maximize'],
+            algorithm='nsga3',
+            reference_point_divisions=3,
+            population_size=4,
+            generations=5,
+            seed=42,
+        )
+        pareto, history = ga.run()
+        assert len(pareto) > 0

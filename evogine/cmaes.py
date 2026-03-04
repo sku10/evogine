@@ -1,16 +1,20 @@
 import math
+import multiprocessing as mp
 import json
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import FloatRange, GeneBuilder
 
 
 class CMAESOptimizer:
     """
     CMA-ES (Covariance Matrix Adaptation Evolution Strategy) optimizer.
+
+    The on_generation callback may return a dict of parameter overrides.
+    Steerable keys: patience, min_delta, tolx, tolfun.
 
     For FloatRange-only problems. CMA-ES learns the shape of the fitness landscape
     by maintaining and adapting a covariance matrix — effectively learning which
@@ -46,6 +50,15 @@ class CMAESOptimizer:
                          gens_without_improvement, stop_reason
     """
 
+    _STEERABLE_KEYS = {'patience', 'min_delta', 'tolx', 'tolfun'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -61,6 +74,8 @@ class CMAESOptimizer:
         tolx: float = 1e-8,
         tolfun: float = 1e-10,
         on_generation: Optional[Callable] = None,
+        use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
     ):
         if mode not in ('maximize', 'minimize'):
             raise ValueError("mode must be 'maximize' or 'minimize'")
@@ -93,9 +108,21 @@ class CMAESOptimizer:
         self.tolx             = tolx
         self.tolfun           = tolfun
         self._on_generation   = on_generation
+        self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
+        self._pool = None
         self._n   = n
         self._lam = popsize if popsize is not None else (4 + int(3 * math.log(n)))
         self._mu  = self._lam // 2
+
+    def _diagnose_generation(self, sigma, improved):
+        if sigma < self.tolx * 10:
+            return 'sigma_collapsed', 'Step size near zero; optimum may be found or increase sigma0'
+        if sigma > 1.0:
+            return 'sigma_diverging', 'Step size growing; landscape may be deceptive'
+        if improved:
+            return 'improving', 'No changes needed'
+        return 'stable', 'No changes needed'
 
     def _to_individual(self, x) -> dict:
         """Convert a normalized [0,1]^n vector to a gene dict, clamped to gene ranges."""
@@ -125,6 +152,9 @@ class CMAESOptimizer:
             )
 
         _seed_all(self._seed)
+
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
 
         n   = self._n
         lam = self._lam
@@ -166,7 +196,12 @@ class CMAESOptimizer:
             arz = np.random.randn(lam, n)
             arx = m + sigma * (B @ (D * arz).T).T
 
-            fitvals    = np.array([self._evaluate(arx[k]) for k in range(lam)])
+            if self._pool is not None:
+                individuals = [self._to_individual(arx[k]) for k in range(lam)]
+                raw_fits = list(self._pool.map(self.fitness_function, individuals))
+                fitvals = np.array([self._sign * f for f in raw_fits])
+            else:
+                fitvals = np.array([self._evaluate(arx[k]) for k in range(lam)])
             sorted_idx = np.argsort(fitvals)[::-1]
 
             gen_best_internal = float(fitvals[sorted_idx[0]])
@@ -183,6 +218,8 @@ class CMAESOptimizer:
                 gens_without_improvement += 1
 
             running_best_real = best_score_internal * self._sign
+            diagnosis, recommendation = self._diagnose_generation(sigma, improved)
+
             history.append({
                 'gen':                      gen,
                 'best_score':               running_best_real,
@@ -191,6 +228,8 @@ class CMAESOptimizer:
                 'improved':                 improved,
                 'gens_without_improvement': gens_without_improvement,
                 'stop_reason':              None,
+                'diagnosis':                diagnosis,
+                'recommendation':           recommendation,
             })
 
             print(
@@ -199,7 +238,8 @@ class CMAESOptimizer:
             )
 
             if self._on_generation is not None:
-                self._on_generation(gen, running_best_real, gen_avg_real, best_individual)
+                result = self._on_generation(gen, running_best_real, gen_avg_real, best_individual)
+                self._apply_steering(result)
 
             m_old = m.copy()
             m = sum(weights[i] * arx[sorted_idx[i]] for i in range(mu))
@@ -264,6 +304,11 @@ class CMAESOptimizer:
                 history[-1]['stop_reason'] = stop_reason
                 break
 
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
+
         elapsed = time.time() - t_start
 
         if best_individual is None:
@@ -308,6 +353,8 @@ class CMAESOptimizer:
                 'mode':            self._mode,
                 'tolx':            self.tolx,
                 'tolfun':          self.tolfun,
+                'use_multiprocessing': self.use_multiprocessing,
+                'workers':            self._workers,
                 'lambda':          cma_params['lam'],
                 'mu':              cma_params['mu'],
                 'mueff':           round(cma_params['mueff'], 4),

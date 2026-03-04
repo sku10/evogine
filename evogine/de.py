@@ -1,16 +1,20 @@
 import random
+import multiprocessing as mp
 import json
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import FloatRange, GeneBuilder
 
 
 class DEOptimizer:
     """
     Differential Evolution optimizer using the SHADE algorithm.
+
+    The on_generation callback may return a dict of parameter overrides.
+    Steerable keys: strategy, patience, min_delta.
 
     For FloatRange-only problems. SHADE maintains a history memory of successful
     mutation factor (F) and crossover rate (CR) values to adapt these parameters
@@ -44,6 +48,17 @@ class DEOptimizer:
                          improved, gens_without_improvement, stop_reason, pop_size
     """
 
+    _STEERABLE_KEYS = {'strategy', 'patience', 'min_delta'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key == 'strategy' and value not in ('current_to_best', 'rand1'):
+                continue
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -59,6 +74,8 @@ class DEOptimizer:
         seed: Optional[int] = None,
         log_path: Optional[str] = None,
         on_generation: Optional[Callable] = None,
+        use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
     ):
         if mode not in ('maximize', 'minimize'):
             raise ValueError("mode must be 'maximize' or 'minimize'")
@@ -92,8 +109,22 @@ class DEOptimizer:
         self._seed = seed
         self.log_path = log_path
         self._on_generation = on_generation
+        self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
+        self._pool = None
         self._n = n
         self._min_population = 4
+
+    def _diagnose_generation(self, F_mean, CR_mean, improved, gens_without_improvement):
+        if F_mean < 0.1:
+            return 'F_collapsed', 'Step size too small; increase population_size or try rand1 strategy'
+        if CR_mean > 0.95:
+            return 'CR_saturated', 'Nearly full crossover; problem may be separable — try rand1'
+        if improved:
+            return 'improving', 'No changes needed'
+        if gens_without_improvement > 10:
+            return 'stagnating', 'Consider increasing population_size'
+        return 'stable', 'No changes needed'
 
     def _to_individual(self, x: list[float]) -> dict:
         """Convert normalized [0,1]^n vector to gene dict, clamped to bounds."""
@@ -130,7 +161,16 @@ class DEOptimizer:
 
         pop_size = self.population_size
         pop = [[random.random() for _ in range(n)] for _ in range(pop_size)]
-        fit = [self._evaluate(x) for x in pop]
+
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
+
+        if self._pool is not None:
+            individuals = [self._to_individual(x) for x in pop]
+            raw_fits = list(self._pool.map(self.fitness_function, individuals))
+            fit = [self._sign * f for f in raw_fits]
+        else:
+            fit = [self._evaluate(x) for x in pop]
 
         # SHADE memory
         M_F  = [0.5] * self.memory_size
@@ -170,30 +210,33 @@ class DEOptimizer:
 
             best_i = fit.index(max(fit))
 
+            trials = []
+            trial_meta = []
+
             for i in range(pop_size):
                 r_mem = random.randint(0, self.memory_size - 1)
                 F  = min(1.0, max(0.0, random.gauss(M_F[r_mem], 0.1)))
                 CR = min(1.0, max(0.0, random.gauss(M_CR[r_mem], 0.1)))
 
-                pool = [j for j in range(pop_size) if j != i]
+                candidates = [j for j in range(pop_size) if j != i]
 
                 if self.strategy == 'current_to_best':
-                    non_best = [j for j in pool if j != best_i]
+                    non_best = [j for j in candidates if j != best_i]
                     if len(non_best) >= 2:
                         r1, r2 = random.sample(non_best, 2)
                     elif non_best:
                         r1 = r2 = non_best[0]
                     else:
-                        r1 = r2 = pool[0] if pool else i
+                        r1 = r2 = candidates[0] if candidates else i
                     v = [
                         pop[i][d] + F * (pop[best_i][d] - pop[i][d]) + F * (pop[r1][d] - pop[r2][d])
                         for d in range(n)
                     ]
                 else:  # rand1
-                    if len(pool) >= 3:
-                        r1, r2, r3 = random.sample(pool, 3)
+                    if len(candidates) >= 3:
+                        r1, r2, r3 = random.sample(candidates, 3)
                     else:
-                        r1, r2, r3 = pool[0], pool[0], pool[0]
+                        r1, r2, r3 = candidates[0], candidates[0], candidates[0]
                     v = [
                         pop[r1][d] + F * (pop[r2][d] - pop[r3][d])
                         for d in range(n)
@@ -207,7 +250,17 @@ class DEOptimizer:
                     for d in range(n)
                 ]
 
-                trial_fit = self._evaluate(trial)
+                trials.append(trial)
+                trial_meta.append((i, F, CR))
+
+            if self._pool is not None:
+                trial_individuals = [self._to_individual(t) for t in trials]
+                raw_fits = list(self._pool.map(self.fitness_function, trial_individuals))
+                trial_fits = [self._sign * f for f in raw_fits]
+            else:
+                trial_fits = [self._evaluate(t) for t in trials]
+
+            for (i, F, CR), trial, trial_fit in zip(trial_meta, trials, trial_fits):
                 if trial_fit >= fit[i]:
                     new_pop[i] = trial
                     new_fit[i] = trial_fit
@@ -239,6 +292,10 @@ class DEOptimizer:
             F_mean  = sum(M_F)  / len(M_F)
             CR_mean = sum(M_CR) / len(M_CR)
 
+            diagnosis, recommendation = self._diagnose_generation(
+                F_mean, CR_mean, improved, gens_without_improvement,
+            )
+
             history.append({
                 'gen':                      gen,
                 'best_score':               running_best_real,
@@ -249,6 +306,8 @@ class DEOptimizer:
                 'gens_without_improvement': gens_without_improvement,
                 'stop_reason':              None,
                 'pop_size':                 pop_size,
+                'diagnosis':                diagnosis,
+                'recommendation':           recommendation,
             })
 
             print(
@@ -257,12 +316,18 @@ class DEOptimizer:
             )
 
             if self._on_generation is not None:
-                self._on_generation(gen, running_best_real, gen_avg_real, best_individual)
+                result = self._on_generation(gen, running_best_real, gen_avg_real, best_individual)
+                self._apply_steering(result)
 
             if self.patience is not None and gens_without_improvement >= self.patience:
                 history[-1]['stop_reason'] = 'patience'
                 print(f"[EARLY STOP] No improvement for {self.patience} generations.")
                 break
+
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
 
         elapsed = time.time() - t_start
         best_score_real = best_score_internal * self._sign
@@ -299,6 +364,8 @@ class DEOptimizer:
                 'patience':             self.patience,
                 'min_delta':            self.min_delta,
                 'mode':                 self._mode,
+                'use_multiprocessing':  self.use_multiprocessing,
+                'workers':              self._workers,
             },
             'genes': self.genes.describe(),
             'result': {

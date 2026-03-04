@@ -5,14 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "evogine"
 version = "0.1.0"
-description = "A clean, controllable evolutionary optimization library — genetic algorithms, CMA-ES, island models, and Pareto optimization with named genes, strict bounds, and structured logging."
+description = "Genetic algorithm and evolutionary optimization engine with built-in diagnostics and AI-agent steering — GA, CMA-ES, differential evolution, island models, NSGA-II/III, and MAP-Elites."
 readme = "README.md"
 license = { text = "MIT" }
+authors = [{ name = "Sami Kuisma", email = "sami.kuisma@gmail.com" }]
 requires-python = ">=3.10"
 dependencies = []
-keywords = ["genetic algorithm", "optimization", "evolutionary", "CMA-ES", "Pareto", "NSGA-II"]
+keywords = [
+    "genetic algorithm",
+    "evolutionary optimization",
+    "optimization",
+    "CMA-ES",
+    "differential evolution",
+    "NSGA-II",
+    "Pareto",
+    "island model",
+    "MAP-Elites",
+    "multi-objective",
+    "hyperparameter tuning",
+    "AI agent",
+    "parameter search",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -35,9 +50,9 @@ cmaes = [
 ]
 
 [project.urls]
-Homepage   = "https://github.com/yourname/evogine"
-Repository = "https://github.com/yourname/evogine"
-Issues     = "https://github.com/yourname/evogine/issues"
+Homepage   = "https://github.com/sku10/evogine"
+Repository = "https://github.com/sku10/evogine"
+Issues     = "https://github.com/sku10/evogine/issues"
 
 [tool.setuptools]
-py-modules = ["evogine"]
+packages = ["evogine"]

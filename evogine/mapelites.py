@@ -1,16 +1,20 @@
 import random
+import multiprocessing as mp
 import json
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all
+from ._utils import _seed_all, _resolve_workers
 from .genes import GeneBuilder
 
 
 class MAPElites:
     """
     MAP-Elites (Multi-dimensional Archive of Phenotypic Elites) optimizer.
+
+    The on_generation callback may return a dict of parameter overrides.
+    Steerable keys: mutation_rate.
 
     Maintains a quality-diversity archive: a discretized behavior grid where
     each cell stores the best individual found for that region of behavior space.
@@ -41,6 +45,15 @@ class MAPElites:
         history: list of dicts with keys: gen, archive_size, best_score, coverage
     """
 
+    _STEERABLE_KEYS = {'mutation_rate'}
+
+    def _apply_steering(self, result):
+        if not isinstance(result, dict):
+            return
+        for key, value in result.items():
+            if key in self._STEERABLE_KEYS:
+                setattr(self, key, value)
+
     def __init__(
         self,
         gene_builder: GeneBuilder,
@@ -54,6 +67,9 @@ class MAPElites:
         seed: Optional[int] = None,
         log_path: Optional[str] = None,
         on_generation: Optional[Callable] = None,
+        use_multiprocessing: bool = False,
+        workers: Optional[int] = None,
+        batch_size: int = 1,
     ):
         if mode not in ('maximize', 'minimize'):
             raise ValueError("mode must be 'maximize' or 'minimize'")
@@ -72,9 +88,22 @@ class MAPElites:
         self._seed = seed
         self.log_path = log_path
         self._on_generation = on_generation
+        self.use_multiprocessing = use_multiprocessing
+        self._workers = workers
+        self.batch_size = max(1, batch_size)
+        self._pool = None
         self._total_cells = 1
         for d in self.grid_shape:
             self._total_cells *= d
+
+    def _diagnose_generation(self, coverage, gen, archive_size, prev_archive_size, stagnant_count):
+        if coverage > 0.8:
+            return 'well_covered', 'Archive nearly full; consider finer grid_shape'
+        if coverage < 0.05 and gen > self.generations * 0.5:
+            return 'poor_coverage', 'Increase mutation_rate or initial_population'
+        if stagnant_count >= 50:
+            return 'archive_stagnant', 'Increase mutation_rate'
+        return 'exploring', 'No changes needed'
 
     def _discretize(self, behavior: tuple) -> Optional[tuple]:
         """
@@ -128,51 +157,91 @@ class MAPElites:
         archive: dict = {}
         history: list[dict] = []
 
+        n_workers = _resolve_workers(self._workers, self.use_multiprocessing)
+        self._pool = mp.Pool(n_workers) if n_workers is not None else None
+
         # Seeding phase
-        for _ in range(self.initial_population):
-            ind = self.genes.sample()
-            score = self._evaluate(ind)
+        seeds = [self.genes.sample() for _ in range(self.initial_population)]
+        if self._pool is not None:
+            raw_scores = list(self._pool.map(self.fitness_function, seeds))
+            seed_scores = [self._sign * s for s in raw_scores]
+        else:
+            seed_scores = [self._evaluate(ind) for ind in seeds]
+        for ind, score in zip(seeds, seed_scores):
             self._try_add(archive, ind, score)
 
         best_internal = max((v['_internal'] for v in archive.values()), default=float('-inf'))
+        initial_coverage = len(archive) / self._total_cells
+        diagnosis, recommendation = self._diagnose_generation(
+            initial_coverage, 0, len(archive), 0, 0,
+        )
         history.append({
             'gen': 0,
             'archive_size': len(archive),
             'best_score': best_internal * self._sign,
-            'coverage': round(len(archive) / self._total_cells, 6),
+            'coverage': round(initial_coverage, 6),
+            'diagnosis': diagnosis,
+            'recommendation': recommendation,
         })
+        prev_archive_size = len(archive)
+        stagnant_count = 0
 
         # Main loop
         for gen in range(1, self.generations + 1):
-            if archive:
-                cells = list(archive.keys())
-                parent_cell = random.choice(cells)
-                parent = archive[parent_cell]['individual'].copy()
-                child = self.genes.mutate(parent, self.mutation_rate)
-            else:
-                child = self.genes.sample()
+            children = []
+            for _ in range(self.batch_size):
+                if archive:
+                    cells = list(archive.keys())
+                    parent = archive[random.choice(cells)]['individual'].copy()
+                    children.append(self.genes.mutate(parent, self.mutation_rate))
+                else:
+                    children.append(self.genes.sample())
 
-            score = self._evaluate(child)
-            self._try_add(archive, child, score)
+            if self._pool is not None:
+                raw_scores = list(self._pool.map(self.fitness_function, children))
+                scores = [self._sign * s for s in raw_scores]
+            else:
+                scores = [self._evaluate(c) for c in children]
+
+            for child, score in zip(children, scores):
+                self._try_add(archive, child, score)
 
             best_internal = max(v['_internal'] for v in archive.values())
             coverage = len(archive) / self._total_cells
+
+            if len(archive) == prev_archive_size:
+                stagnant_count += 1
+            else:
+                stagnant_count = 0
+                prev_archive_size = len(archive)
+
+            diagnosis, recommendation = self._diagnose_generation(
+                coverage, gen, len(archive), prev_archive_size, stagnant_count,
+            )
 
             history.append({
                 'gen': gen,
                 'archive_size': len(archive),
                 'best_score': best_internal * self._sign,
                 'coverage': round(coverage, 6),
+                'diagnosis': diagnosis,
+                'recommendation': recommendation,
             })
 
             if self._on_generation is not None:
-                self._on_generation(gen, len(archive), best_internal * self._sign, coverage)
+                result = self._on_generation(gen, len(archive), best_internal * self._sign, coverage)
+                self._apply_steering(result)
 
             if gen % max(1, self.generations // 10) == 0:
                 print(
                     f"[GEN {gen:05}] Archive: {len(archive)}/{self._total_cells} cells "
                     f"({coverage*100:.1f}%) | Best: {best_internal * self._sign:.8f}"
                 )
+
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
 
         elapsed = time.time() - t_start
 
@@ -202,13 +271,18 @@ class MAPElites:
                 'generations':        self.generations,
                 'mutation_rate':      self.mutation_rate,
                 'mode':               self._mode,
+                'use_multiprocessing': self.use_multiprocessing,
+                'workers':            self._workers,
+                'batch_size':         self.batch_size,
             },
             'genes': self.genes.describe(),
             'result': {
                 'archive_size': len(archive),
                 'coverage':     round(len(archive) / self._total_cells, 6),
                 'best_score':   max(
-                    (e['score'] * self._sign for e in archive.values()), default=None
+                    (e['score'] for e in archive.values()), default=None
+                ) if self._mode == 'maximize' else min(
+                    (e['score'] for e in archive.values()), default=None
                 ),
                 'archive': serializable_archive,
             },

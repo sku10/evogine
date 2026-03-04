@@ -343,6 +343,93 @@ Good candidate for a separate `evogine.viz` module or even a separate package.
 
 ---
 
+## Scaling & Compute
+
+### Distributed Worker Pools
+
+**What:** Scale fitness evaluation horizontally across tens, hundreds, or thousands of CPU
+workers — from a local cluster to cloud spot instances. The `fn(dict) -> float` interface
+serializes trivially over the wire, so no API redesign is needed.
+
+**Why:** For expensive fitness functions (backtests, simulations, ML training loops), a single
+machine hits a ceiling. Distributed evaluation offers near-linear speedup: 100 workers,
+pop_size=10000, 1s/eval → ~100s/gen instead of ~10000s. The sweet spot is fitness cost >>
+network roundtrip.
+
+**Design — external pool injection:**
+```python
+# Local (current)
+ga = GeneticAlgorithm(..., workers=8)
+
+# Distributed — user brings their own pool
+from ray.util.multiprocessing import Pool as RayPool
+pool = RayPool(ray_address="auto")
+ga = GeneticAlgorithm(..., pool=pool)
+
+# Or Dask
+from dask.distributed import Client
+client = Client("scheduler:8786")
+ga = GeneticAlgorithm(..., pool=client)
+```
+
+A `pool` parameter accepting anything with `.map(fn, iterable)`. `multiprocessing.Pool`,
+Ray, Dask, `concurrent.futures.ProcessPoolExecutor` — all have this interface. evogine
+doesn't need to know which backend it is.
+
+**Lifecycle:** External pool = user-managed. evogine doesn't create or close it.
+
+**Resolution priority:**
+1. `pool` (external, user-managed) — highest
+2. `workers` (local multiprocessing) — current
+3. `use_multiprocessing` (legacy compat)
+
+**Natural fits at scale:**
+- **Island model** — each island on a separate node, migration over network
+- **MAP-Elites** with batch_size=1000 on 1000 workers — archive fills fast
+- **Ensemble runs** — 100 independent GA runs with different seeds, best-of-100
+
+**Effort:** Small. The internal `.map()` call is already compatible. Main work is the
+pool parameter plumbing and lifecycle docs.
+
+---
+
+### GPU-Accelerated Optimizers
+
+**What:** Optional GPU backend for optimizers with vectorizable inner loops. Not a
+replacement for CPU mode — a parallel path for specific use cases where population sizes
+are large (10k+) and the fitness function is itself GPU-native.
+
+**Why:** CMA-ES eigendecomposition, DE trial generation, and large-batch MAP-Elites map
+cleanly to GPU. Corporate users with heavy compute budgets will expect this option.
+
+**Design — two-tier API:**
+```python
+# CPU (default, current)
+ga = GeneticAlgorithm(..., fitness_function=my_fn, workers=8)
+
+# GPU — requires batched tensor fitness function
+ga = GeneticAlgorithm(..., fitness_function=my_batched_fn, device='cuda')
+# fn(tensor[N, D]) -> tensor[N] instead of fn(dict) -> float
+```
+
+Dict↔tensor conversion only at boundaries (init, final result). Internally stays on-device.
+
+**Implementation order by ROI:**
+1. **CMA-ES** — eigendecomposition + matrix ops via cuBLAS, cleanest win
+2. **DE** — vectorized trial generation, trivial in torch
+3. **MAP-Elites** — batch mutations + evals, archive stays CPU-side
+4. **GA/Island** — branchy operators need custom kernels, lowest ROI
+
+**Architecture:**
+- New module `evogine/backends/` with a backend protocol: `evaluate_batch`, `mutate_batch`
+- Auto-detect torch/jax, graceful fallback
+- Optional dependency — no torch import unless `device='cuda'`
+
+**Effort:** Large. Requires new fitness function interface and backend abstraction. Worth
+doing after distributed pools prove the demand.
+
+---
+
 ## Research-Backed Future Ideas
 
 State-of-the-art findings from evolutionary computation research (2022–2026).

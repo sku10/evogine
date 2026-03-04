@@ -23,9 +23,10 @@ the same design contract:
 | `MAPElites` | Quality-diversity | Any | `(archive, history)` |
 | `landscape_analysis()` | Landscape sampling | Any | `dict` report |
 
-Every class shares the same conventions: `mode=`, `seed=`, `log_path=`, `on_generation=`,
-`patience=`. Scores in history and callbacks are always real user-facing values (un-negated
-even in minimize mode).
+Most classes share common conventions: `seed=`, `log_path=`, `on_generation=`. Single-objective
+optimizers share `mode=` and `patience=`; MultiObjectiveGA uses per-objective `objectives=`
+instead of `mode=`; MAPElites has no `patience=`. Scores in history and callbacks are always
+real user-facing values (un-negated even in minimize mode).
 
 ---
 
@@ -81,12 +82,12 @@ coverage (MAPElites), adaptive F/CR means (DEOptimizer), population size when sh
 not a summary.
 
 Each optimizer adds its own diagnostic fields to history:
-- **GA:** `diversity`, `restarted`, `mutation_rate` (adaptive), `pop_size` (LPR)
-- **IslandModel:** `island_bests` per island
-- **MultiObjectiveGA:** `pareto_size`, `hypervolume_proxy`
-- **CMAESOptimizer:** `sigma`
-- **DEOptimizer:** `F_mean`, `CR_mean`, `pop_size`
-- **MAPElites:** `archive_size`, `coverage`
+- **GA:** `diversity`, `restarted`, `mutation_rate` (adaptive), `diagnosis`, `recommendation`
+- **IslandModel:** `island_bests` per island, `diagnosis`, `recommendation`
+- **MultiObjectiveGA:** `pareto_size`, `hypervolume_proxy`, `diagnosis`, `recommendation`
+- **CMAESOptimizer:** `sigma`, `diagnosis`, `recommendation`
+- **DEOptimizer:** `F_mean`, `CR_mean`, `pop_size`, `diagnosis`, `recommendation`
+- **MAPElites:** `archive_size`, `coverage`, `diagnosis`, `recommendation`
 
 ### 3. No Magic, No Drift
 
@@ -251,20 +252,22 @@ the run. This phase is implemented across all six optimizers.
 optimizer class. This is a first step toward autonomous decision-making: the library
 itself tells you which of its own tools to use, and explains why in plain language.
 
-**Phase 2 (near-term): AI-driven diagnosis**
+**Phase 2 (implemented): AI-driven diagnosis and steering**
 
-An AI agent is given a log and the docs as context and can:
-- Identify the convergence pattern and its cause
-- Read the diversity curve and diagnose premature convergence or random walk
-- Read `F_mean` / `CR_mean` in a DEOptimizer log and diagnose adaptation failure
-- Read `coverage` in a MAPElites log and see if the behavioral grid is being filled
+Every history entry now includes `diagnosis` and `recommendation` strings — machine-readable
+labels that an AI agent can act on without interpreting raw numbers. The `on_generation`
+callback can return a dict of parameter overrides (the steering interface), allowing an agent
+to adjust parameters mid-run based on diagnosis. `GeneticAlgorithm.from_checkpoint()` lets
+an agent resume a run with different parameters. `AGENT_GUIDE.md` provides decision trees
+formatted for LLM consumption.
+
+An AI agent can now:
+- Read `diagnosis` / `recommendation` from history entries directly
+- Steer parameters mid-run via the callback return value
+- Resume from checkpoints with overrides via `from_checkpoint()`
+- Follow the decision trees in AGENT_GUIDE.md for optimizer selection and tuning
+- Identify convergence patterns, diversity issues, F/CR collapse, sigma divergence
 - Compare island bests and identify islands that are stuck vs. progressing
-- Read Pareto history and see if the front is growing or stagnant
-- Suggest specific parameter changes with reasoning pulled from the docs
-- Suggest switching optimizer class based on observed landscape characteristics
-
-This works today if the user provides both the log and features.md as context.
-The goal is that it works reliably — the docs explain every pattern the AI will encounter.
 
 **Phase 3 (future): Autonomous parameter tuning**
 

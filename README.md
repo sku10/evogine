@@ -1,7 +1,19 @@
 # evogine
 
-A clean, controllable evolutionary optimization library — named genes, strict bounds,
-structured logging, and minimal boilerplate.
+**Genetic algorithm and evolutionary optimization engine with built-in diagnostics, structured logs, and mid-run steering — designed for AI agents to read, reason about, and control autonomously.**
+
+GA, CMA-ES, differential evolution, island models, NSGA-II/III, MAP-Elites. Six optimizers, zero required dependencies. Every run fully reproducible and machine-interpretable.
+
+---
+
+## At a glance
+
+- **GA, CMA-ES, DE, Island Model, NSGA-II/III, MAP-Elites** — same interface, swap in one line
+- **AI-readable logs** — structured JSON with `diagnosis`, `recommendation`, and convergence analysis per generation
+- **Mid-run steering** — `on_generation` callbacks return parameter overrides; an agent adjusts while the optimizer runs
+- **Named genes with strict bounds** — `FloatRange`, `IntRange`, `ChoiceList` in the same individual; values never drift
+- **Checkpoint, resume, reproduce** — seeded execution, full config in every log, resume from any checkpoint
+- **Pure Python** — no required dependencies; numpy only for CMA-ES (opt-in)
 
 ---
 
@@ -14,7 +26,7 @@ pip install evogine
 Or from source:
 
 ```bash
-git clone https://github.com/yourname/evogine
+git clone https://github.com/sku10/evogine
 cd evogine
 pip install -e .
 ```
@@ -121,15 +133,21 @@ Individuals are plain Python `dict`s — no special classes, no magic.
 - **`landscape_analysis()`** — samples fitness landscape, measures ruggedness/neutrality/modes,
   recommends the best optimizer for the problem
 
+**Agent autonomy**
+- **Steering interface** — `on_generation` callbacks can return parameter overrides mid-run
+- **Per-generation diagnosis** — every history entry has `diagnosis` + `recommendation` strings
+- **`from_checkpoint()`** — classmethod to create a GA from a saved checkpoint with parameter overrides
+- **[AGENT_GUIDE.md](AGENT_GUIDE.md)** — prompt-optimized decision tree for LLM agents
+
 **Observability**
-- **Generation history** — `best_score`, `avg_score`, `diversity`, `mutation_rate`, `restarted` per generation
+- **Generation history** — `best_score`, `avg_score`, `diversity`, `mutation_rate`, `restarted`, `diagnosis` per generation
 - **Diversity metric** — tracks how spread-out the population is each generation (0.0–1.0)
 - **Structured JSON logging** — machine- and AI-readable logs with convergence analysis
-- **Callback hook** — `on_generation` for live plots, progress bars, custom logging
+- **Callback hook** — `on_generation` for live plots, progress bars, steering, custom logging
 - **Checkpoint / resume** — save state, resume interrupted runs (essential for long backtests)
 
 **Testing**
-- **376 tests** across 8 test files
+- **425 tests** across 10 test files
 - **Property-based tests** via `hypothesis` — invariants verified against hundreds of random inputs
 
 ---
@@ -645,4 +663,14 @@ See [features.md](features.md) for:
 
 ## License
 
-MIT
+MIT — use it freely in personal, commercial, and research projects. See [LICENSE](LICENSE).
+
+---
+
+## Contributing
+
+Pull requests, bug reports, and feature suggestions are welcome via
+[GitHub Issues](https://github.com/sku10/evogine/issues).
+
+For consulting, custom optimization work, or other inquiries:
+**sami.kuisma@gmail.com**
