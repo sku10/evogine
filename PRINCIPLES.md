@@ -8,9 +8,30 @@ Read this before adding a feature, changing a parameter name, or restructuring a
 
 ---
 
+## Optimizer Roster
+
+evogine implements six optimizer classes and one diagnostic function, all following
+the same design contract:
+
+| Class | Algorithm | Gene constraint | Return shape |
+|---|---|---|---|
+| `GeneticAlgorithm` | Standard GA | Any | `(individual, score, history)` |
+| `IslandModel` | Multi-population GA | Any | `(individual, score, history)` |
+| `MultiObjectiveGA` | NSGA-II / NSGA-III | Any | `(pareto_front, history)` |
+| `CMAESOptimizer` | CMA-ES | FloatRange only | `(individual, score, history)` |
+| `DEOptimizer` | SHADE / L-SHADE | FloatRange only | `(individual, score, history)` |
+| `MAPElites` | Quality-diversity | Any | `(archive, history)` |
+| `landscape_analysis()` | Landscape sampling | Any | `dict` report |
+
+Every class shares the same conventions: `mode=`, `seed=`, `log_path=`, `on_generation=`,
+`patience=`. Scores in history and callbacks are always real user-facing values (un-negated
+even in minimize mode).
+
+---
+
 ## Vision
 
-**Make genetic algorithm runs fully interpretable — by humans and by AI agents.**
+**Make evolutionary optimization runs fully interpretable — by humans and by AI agents.**
 
 A run should produce enough structured information that an intelligent agent (human or AI)
 can read the output, understand what happened, diagnose what went wrong, and propose
@@ -54,16 +75,31 @@ You cannot improve what you cannot see. Every internal state that affects the ou
 must be visible in the history and the log.
 
 This means: not just best score, but average score, diversity, mutation rate, restart
-events, convergence generation, per-island performance, Pareto front size. The log is
-a complete reconstruction of the run, not a summary.
+events, convergence generation, per-island performance, Pareto front size, archive
+coverage (MAPElites), adaptive F/CR means (DEOptimizer), population size when shrinking
+(L-SHADE), sigma trajectory (CMA-ES). The log is a complete reconstruction of the run,
+not a summary.
+
+Each optimizer adds its own diagnostic fields to history:
+- **GA:** `diversity`, `restarted`, `mutation_rate` (adaptive), `pop_size` (LPR)
+- **IslandModel:** `island_bests` per island
+- **MultiObjectiveGA:** `pareto_size`, `hypervolume_proxy`
+- **CMAESOptimizer:** `sigma`
+- **DEOptimizer:** `F_mean`, `CR_mean`, `pop_size`
+- **MAPElites:** `archive_size`, `coverage`
 
 ### 3. No Magic, No Drift
 
 The core promise is: **a gene defined as FloatRange(0, 1) will never produce a value
-outside [0, 1], under any circumstances.**
+outside [0, 1], under any circumstances.** This holds across all mutation distributions
+(Gaussian, Levy), all optimizers, all modes.
 
 More broadly: nothing should happen that the user didn't explicitly allow. No implicit
 normalization, no undocumented transformations, no silent fallbacks that change behavior.
+
+**LLMCrossover exception:** when the LLM function returns invalid output, the fallback
+to `UniformCrossover` is explicit, documented, printed to stderr, and tracked via
+`fallback_count`. The user opted into the possibility of fallback by using the class.
 
 ### 4. Interchangeable Components
 
@@ -81,6 +117,38 @@ The core library has no required dependencies. Pure Python, zero imports beyond 
 standard library. Fitness functions often run in constrained environments; the library
 should never be the bottleneck. Optional integrations (numpy seeding, multiprocessing,
 hypothesis tests) are explicitly opt-in.
+
+This applies to new additions too: Levy flight uses a pure-Python Chambers-Mallows-Stuck
+approximation rather than scipy. CMA-ES requires numpy but raises a clear error if it
+is missing.
+
+### 6. Modular Architecture
+
+Each optimizer lives in its own file. The library is a Python package (`evogine/`)
+with one file per component:
+
+```
+evogine/
+  __init__.py       — public API, re-exports everything
+  genes.py          — FloatRange, IntRange, ChoiceList, GeneBuilder
+  operators.py      — selection + crossover strategies
+  ga.py             — GeneticAlgorithm
+  island.py         — IslandModel
+  multi_objective.py — MultiObjectiveGA
+  cmaes.py          — CMAESOptimizer
+  de.py             — DEOptimizer
+  mapelites.py      — MAPElites
+  analysis.py       — landscape_analysis()
+  _utils.py         — shared utilities (_seed_all)
+```
+
+**Rule:** No file should exceed ~400 lines. If it does, it's a sign the abstraction
+needs splitting. Monolithic files make edits error-prone, slow to navigate, and hard
+to isolate for debugging.
+
+**Backward compatibility:** `__init__.py` re-exports everything. `from evogine import X`
+always works regardless of which submodule `X` lives in. Users never import from submodules
+directly.
 
 ---
 
@@ -175,32 +243,43 @@ The vision has three phases:
 
 Logs are structured JSON with a shared vocabulary with the docs. A user can paste a
 log to any AI agent and get useful analysis. The `analysis.notes` field pre-interprets
-the run. This phase is implemented.
+the run. This phase is implemented across all six optimizers.
+
+**Phase 1.5 (current): Automated optimizer selection**
+
+`landscape_analysis()` samples the fitness landscape and recommends the most suitable
+optimizer class. This is a first step toward autonomous decision-making: the library
+itself tells you which of its own tools to use, and explains why in plain language.
 
 **Phase 2 (near-term): AI-driven diagnosis**
 
 An AI agent is given a log and the docs as context and can:
 - Identify the convergence pattern and its cause
 - Read the diversity curve and diagnose premature convergence or random walk
+- Read `F_mean` / `CR_mean` in a DEOptimizer log and diagnose adaptation failure
+- Read `coverage` in a MAPElites log and see if the behavioral grid is being filled
 - Compare island bests and identify islands that are stuck vs. progressing
 - Read Pareto history and see if the front is growing or stagnant
 - Suggest specific parameter changes with reasoning pulled from the docs
+- Suggest switching optimizer class based on observed landscape characteristics
 
 This works today if the user provides both the log and features.md as context.
 The goal is that it works reliably — the docs explain every pattern the AI will encounter.
 
 **Phase 3 (future): Autonomous parameter tuning**
 
-An automated agent runs the GA, reads the log, adjusts parameters, runs again,
+An automated agent runs an optimizer, reads the log, adjusts parameters, runs again,
 and iterates toward user-defined goals. For example:
 
 ```
 Goal: Sharpe ratio > 1.5, max drawdown < 0.15, converge within 100 generations
 ```
 
-The agent runs, reads the log, sees convergence pattern, adjusts mutation rate or
-switches selection strategy, runs again. The library's structured logs make each run
-legible to the agent. The docs provide the knowledge base for reasoning about changes.
+The agent runs `landscape_analysis()`, selects `DEOptimizer`, runs it, reads the log,
+sees that `F_mean` collapsed to near-zero (step size too small), increases `sigma0` or
+switches strategy to `'rand1'`, runs again. The library's structured logs and shared
+vocabulary make each run legible to the agent. The docs provide the knowledge base for
+reasoning about changes.
 
 **What makes this possible:**
 - Logs are structured (not free text)
@@ -231,6 +310,11 @@ Use this checklist:
 - [ ] Are the parameters validated at `__init__` time, not at run time?
 - [ ] Are bounds enforced strictly — can this feature produce out-of-range values?
 - [ ] Are tests written, including edge cases?
+- [ ] Does the feature live in the correct module (not bolted onto a file that is already large)?
+- [ ] Is the new module file under ~400 lines?
+- [ ] Is the new public name re-exported from `__init__.py`?
+- [ ] Is the example in `examples/` updated or a new example file written?
+- [ ] Are `README.md`, `features.md`, and `PRINCIPLES.md` updated?
 
 A feature that passes this checklist is done. A feature that skips any item is not.
 
@@ -243,11 +327,16 @@ not computational graphs. The library is intentionally narrow.
 
 **Not an automatic ML library.** It does not pick the right hyperparameters for you.
 It gives you the tools to define the search space, run the search, and read the results.
-The AI co-pilot goal is about interpretability, not automation of the user's problem.
+`landscape_analysis()` recommends a starting point but the user remains in control.
 
 **Not a general-purpose optimization framework.** There is no gradient-based optimization,
-no Bayesian optimization, no simulated annealing. It is a genetic algorithm library.
-Do one thing well.
+no Bayesian optimization, no simulated annealing. It is an evolutionary optimization
+library — one family of algorithms, done well and fully documented.
 
 **Not a research library.** It does not implement every variant of every operator from
-every paper. It implements what is useful, well-documented, and testable.
+every paper. It implements what is useful, well-documented, and testable. SHADE was chosen
+over basic DE because it removes manual F/CR tuning. NSGA-III was added for 3+ objectives.
+Both are well-established, not experimental.
+
+**Not a black box.** Every parameter is logged. Every decision is documented. The user
+should always be able to understand why the algorithm did what it did.

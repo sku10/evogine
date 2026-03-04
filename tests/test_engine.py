@@ -95,7 +95,7 @@ class TestFloatRange:
     def test_describe(self):
         spec = FloatRange(1.0, 5.0, sigma=0.2)
         d = spec.describe()
-        assert d == {"type": "FloatRange", "low": 1.0, "high": 5.0, "sigma": 0.2}
+        assert d == {"type": "FloatRange", "low": 1.0, "high": 5.0, "sigma": 0.2, "mutation_dist": "gaussian"}
 
 
 # ---------------------------------------------------------------------------

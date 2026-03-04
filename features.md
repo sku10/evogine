@@ -36,24 +36,36 @@ Repeat until the score stops improving or you run out of generations.
 
 Genes define your search space. Each gene describes one parameter you want to optimize.
 
-### `FloatRange(low, high, sigma=0.1, mutation_rate=None)`
+### `FloatRange(low, high, sigma=0.1, mutation_rate=None, mutation_dist='gaussian')`
 
-Continuous float parameter. Mutation adds Gaussian noise: the jump size is
-`sigma × (high - low)`. With the default `sigma=0.1`, each mutation step is
-roughly 10% of the range width.
+Continuous float parameter. Mutation adds noise: the jump size is `sigma × (high - low)`.
+With the default `sigma=0.1`, each mutation step is roughly 10% of the range width.
 
 ```python
 from evogine import FloatRange
 
-genes.add("threshold",   FloatRange(0.0, 1.0))              # ±0.1 per step
+genes.add("threshold",   FloatRange(0.0, 1.0))              # ±0.1 per step, Gaussian
 genes.add("weight",      FloatRange(-5.0, 5.0, sigma=0.05)) # finer steps: ±0.5
 genes.add("factor",      FloatRange(0.0, 100.0, sigma=0.2)) # wider steps: ±20
+genes.add("jump",        FloatRange(0.0, 1.0, mutation_dist='levy'))  # heavy-tailed jumps
 ```
 
 **Choosing sigma:**
 - `sigma=0.1` (default) — good for most problems
 - Smaller (`0.02–0.05`) — fine-tuning; use when you're already close to the optimum
 - Larger (`0.2–0.4`) — wide exploration; use when the optimum could be anywhere
+
+**`mutation_dist`** controls the shape of the mutation distribution:
+- `'gaussian'` (default) — normally distributed steps; most jumps are small with rare large ones
+- `'levy'` — Levy-stable heavy-tailed distribution; produces occasional very large jumps that
+  help escape local optima. Uses a pure-Python Chambers-Mallows-Stuck approximation (no scipy).
+  Best when the landscape has long-range structure or many sharp local optima.
+
+```python
+# Levy flight example: large exploratory jumps, still clamped to bounds
+genes.add("x", FloatRange(0.0, 1.0, mutation_dist='levy'))
+genes.add("y", FloatRange(0.0, 1.0, mutation_dist='levy'))
+```
 
 ### `IntRange(low, high, sigma=0.05, mutation_rate=None)`
 
@@ -172,6 +184,9 @@ ga = GeneticAlgorithm(
     checkpoint_every    = 1,             # save checkpoint every N generations
     restart_after       = None,          # inject fresh individuals after N stagnant gens
     restart_fraction    = 0.3,           # fraction of population replaced on restart
+    linear_pop_reduction = False,        # shrink population linearly over generations
+    min_population      = 4,             # minimum population size when LPR active
+    constraints         = None,          # list of fn(individual) -> bool; Deb's rules
 )
 ```
 
@@ -206,6 +221,16 @@ stop early if nothing improves for 30 gens, but can go up to 500 if needed.
 
 **`min_delta`** — Smallest improvement that counts. Prevents micro-improvements from
 resetting the patience counter forever. Default `1e-6` works for most problems.
+
+**`linear_pop_reduction`** — Shrink population linearly from `population_size` down to
+`min_population` over the course of generations (L-SHADE style). Starts with broad
+exploration and ends focused. `min_population` default is 4.
+
+**`constraints`** — A list of functions `fn(individual) -> bool`. `True` means the
+constraint is satisfied. Uses **Deb's feasibility rules**: feasible individuals always
+rank above infeasible ones, regardless of score. Among infeasible individuals, fewer
+violations ranks higher. The score of an infeasible individual is never returned as the
+best. See the Constraint Handling section below.
 
 ### Running
 
@@ -398,6 +423,105 @@ ga = GeneticAlgorithm(..., crossover=SinglePointCrossover())
 
 **When to use:** When gene order is meaningful — e.g. a sequence of thresholds that
 build on each other, or when earlier genes define a regime and later genes tune within it.
+
+### `LLMCrossover(llm_fn, raise_on_failure=False)`
+
+Delegates crossover logic to a user-supplied function — typically an LLM API call or
+any custom combination logic. The function receives two parent dicts and must return a
+child dict with the same keys.
+
+```python
+from evogine import LLMCrossover
+
+def my_llm_fn(parent1: dict, parent2: dict) -> dict:
+    # Call your LLM, rule engine, domain expert function, etc.
+    response = call_claude(f"Combine these two strategies: {parent1}, {parent2}")
+    return parse_json(response)
+
+ga = GeneticAlgorithm(
+    ...,
+    crossover = LLMCrossover(my_llm_fn, raise_on_failure=False),
+)
+```
+
+**Validation and clamping:** The returned dict is validated — if any required gene key
+is missing, it's treated as a failure. `FloatRange` and `IntRange` values are clamped
+to their bounds. `ChoiceList` values must be one of the valid options.
+
+**Failure handling:**
+- `raise_on_failure=False` (default) — on any exception or invalid result, falls back
+  silently to `UniformCrossover` and increments `crossover.fallback_count`. Prints a
+  warning to stderr.
+- `raise_on_failure=True` — raises the exception immediately.
+
+```python
+ga.run()
+print(f"LLM fallbacks: {ga.crossover.fallback_count}")
+```
+
+**When to use:** Encoding domain knowledge into crossover — e.g. "a financial strategy
+that averages the risk tolerance of the two parents but takes the more aggressive entry
+signal." Standard crossover has no concept of domain semantics; LLMCrossover does.
+
+---
+
+## Constraint Handling
+
+Enforce hard constraints on individuals. Constraints are functions `fn(individual) -> bool`
+where `True` means the constraint is satisfied.
+
+```python
+ga = GeneticAlgorithm(
+    genes, fitness,
+    constraints=[
+        lambda ind: ind['fast_ma'] < ind['slow_ma'],      # fast must be smaller
+        lambda ind: ind['stop_loss'] < ind['take_profit'], # stop below target
+        lambda ind: ind['position_size'] <= 0.25,          # max 25% per trade
+    ],
+)
+```
+
+**Deb's feasibility rules (applied internally):**
+1. A feasible individual always ranks above any infeasible individual, regardless of score
+2. Among two feasible individuals: higher score wins (normal selection)
+3. Among two infeasible individuals: fewer constraint violations wins
+
+**Implementation:** Infeasible individuals are assigned an internal score of
+`-1e18 - violation_count`. This means they participate in selection but will always
+lose to any feasible individual. The actual returned `best_score` is always from a
+feasible individual.
+
+**Interaction with minimize mode:** Works correctly in both modes. Infeasible individuals
+are always placed at the bottom of the ranking regardless of mode.
+
+**Performance note:** Each constraint function is called once per individual per generation.
+If your constraint involves running a backtest, cache the result or combine it with the
+fitness evaluation.
+
+---
+
+## Linear Population Reduction
+
+Shrink the population from `population_size` down to `min_population` linearly over
+`generations`. Starts with broad exploration and ends with a focused, small population:
+
+```python
+ga = GeneticAlgorithm(
+    genes, fitness,
+    population_size      = 100,
+    generations          = 200,
+    linear_pop_reduction = True,
+    min_population       = 4,    # never shrinks below this
+)
+```
+
+Effective population size at generation `g`:
+```
+pop(g) = max(min_population, round(population_size - (population_size - min_population) × g/generations))
+```
+
+**When to use:** Fixed evaluation budgets where you want maximum diversity early and
+tight convergence late. Particularly effective combined with `DEOptimizer` (L-SHADE variant).
 
 ---
 
@@ -727,6 +851,7 @@ im = IslandModel(
     generations        = 100,
     migration_interval = 10,         # exchange individuals every 10 gens
     migration_size     = 2,          # top 2 from each island migrate
+    topology           = 'ring',     # 'ring' | 'fully_connected' | 'star'
     mutation_rate      = 0.1,
     seed               = 42,
     patience           = 30,
@@ -739,9 +864,16 @@ im = IslandModel(
 best, score, history = im.run()
 ```
 
-**How migration works (ring topology):**
-Each island sends its top `migration_size` individuals to the next island in a ring:
-island 0 → island 1 → island 2 → ... → island N-1 → island 0.
+**Migration topologies:**
+
+| Topology | Pattern | When to use |
+|---|---|---|
+| `'ring'` (default) | Island i → island (i+1) % n | Good balance of diversity and convergence; low overhead |
+| `'fully_connected'` | Every island → every other island | Maximum information sharing; populations converge faster |
+| `'star'` | All → hub (island 0) → all | Centralised; hub acts as a global best aggregator |
+
+How migration works (ring): each island sends its top `migration_size` individuals to
+the next island in a ring: 0 → 1 → 2 → ... → N-1 → 0.
 The migrants **replace** the worst individuals in the target island.
 
 **History entries** include `island_bests: list[float]` — the best score on each island
@@ -860,6 +992,47 @@ to accept.
 }
 ```
 
+### NSGA-III: for 3 or more objectives
+
+With 2 objectives, NSGA-II's crowding distance works well. With 3 or more, the crowding
+distance loses meaning in high-dimensional objective space and diversity degrades.
+NSGA-III replaces crowding distance with **reference-point niching** — structured
+reference points spread uniformly across the objective simplex, and individuals near
+underrepresented points are preferred during survival selection.
+
+```python
+ga = MultiObjectiveGA(
+    genes, fitness,
+    n_objectives              = 4,
+    objectives                = ['maximize'] * 4,
+    algorithm                 = 'nsga3',            # switch to NSGA-III
+    reference_point_divisions = 3,                  # Das-Dennis lattice density
+    population_size           = 100,
+    generations               = 200,
+    seed                      = 42,
+)
+```
+
+**`reference_point_divisions`** — controls how many reference points are generated using
+the Das-Dennis simplex lattice method. With `d` divisions and `m` objectives, the number
+of reference points is `C(d+m-1, m-1)`. A reasonable default is `12 // n_objectives`.
+
+| n_objectives | divisions=3 | divisions=4 | divisions=6 |
+|---|---|---|---|
+| 2 | 4 pts | 5 pts | 7 pts |
+| 3 | 10 pts | 15 pts | 28 pts |
+| 4 | 20 pts | 35 pts | 84 pts |
+
+**User-supplied reference points:**
+
+```python
+# Supply your own, e.g. if you care more about one region of the Pareto front
+ga = MultiObjectiveGA(
+    ..., algorithm='nsga3',
+    reference_points=[[0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5]],
+)
+```
+
 ### Callback for MultiObjectiveGA
 
 ```python
@@ -871,6 +1044,7 @@ def on_gen(gen: int, pareto_size: int, hv_proxy: float, pareto_front: list):
 - Your optimization has two or more naturally competing goals
 - You don't want to arbitrary weight-combine objectives (which hides the trade-off)
 - You want to present multiple "best" solutions to a decision maker
+- Use `algorithm='nsga2'` for 2 objectives; `'nsga3'` for 3 or more
 - Classic use case: maximize return AND minimize drawdown simultaneously
 
 ---
@@ -1090,6 +1264,342 @@ The key differences:
 
 ---
 
+## DEOptimizer (Differential Evolution — SHADE)
+
+`DEOptimizer` implements **SHADE** (Success-History based Adaptive Differential Evolution),
+a state-of-the-art DE variant that automatically adapts its scaling factor F and crossover
+rate CR from a history of successful mutations — no manual tuning required.
+
+Supports the **L-SHADE** variant (linear population reduction) via `linear_pop_reduction=True`.
+
+**Constraints:** `FloatRange` genes only; at least 2 genes required. Raises `ValueError`
+at construction otherwise.
+
+### API
+
+```python
+from evogine import DEOptimizer
+
+opt = DEOptimizer(
+    gene_builder          = genes,             # FloatRange only, >= 2 genes
+    fitness_function      = fitness,
+    population_size       = 50,               # individuals
+    generations           = 200,
+    strategy              = 'current_to_best', # or 'rand1'
+    memory_size           = 6,                 # SHADE history size H
+    linear_pop_reduction  = False,             # True = L-SHADE variant
+    patience              = None,
+    min_delta             = 1e-6,
+    mode                  = 'maximize',
+    seed                  = None,
+    log_path              = None,
+    on_generation         = None,              # fn(gen, best_score, avg_score, best_ind)
+)
+
+best, score, history = opt.run()
+```
+
+### Full parameter reference
+
+| Parameter | Default | Description |
+|---|---|---|
+| `gene_builder` | required | `GeneBuilder` with `FloatRange` genes only |
+| `fitness_function` | required | `dict → float` |
+| `population_size` | `50` | Number of individuals |
+| `generations` | `200` | Maximum generations |
+| `strategy` | `'current_to_best'` | Mutation strategy (see below) |
+| `memory_size` | `6` | SHADE history archive size H |
+| `linear_pop_reduction` | `False` | L-SHADE: shrink pop from `population_size` to 4 |
+| `patience` | `None` | Stop after N gens without improvement |
+| `min_delta` | `1e-6` | Minimum improvement to reset patience |
+| `mode` | `'maximize'` | `'maximize'` or `'minimize'` |
+| `seed` | `None` | Random seed |
+| `log_path` | `None` | Path for JSON log |
+| `on_generation` | `None` | Callback `fn(gen, best_score, avg_score, best_ind)` |
+
+### Mutation strategies
+
+**`'current_to_best'`** (default):
+```
+v = x_i + F × (x_best - x_i) + F × (x_r1 - x_r2)
+```
+Biases mutation toward the current best individual. Converges faster but can get trapped.
+
+**`'rand1'`**:
+```
+v = x_r1 + F × (x_r2 - x_r3)
+```
+Fully random base vector. More exploratory; use when `current_to_best` stagnates.
+
+### How SHADE adapts F and CR
+
+- A history memory of size H stores the means of successful F and CR values
+- Each generation: for each individual, sample F from Cauchy(M_F, 0.1), CR from
+  Normal(M_CR, 0.1) drawn from a randomly chosen history slot
+- After selection: update the history slot with Lehmer mean of successful F values
+  (weights larger improvements more), arithmetic mean of successful CR values
+- This removes the need to hand-tune F and CR
+
+### Generation history
+
+```python
+{
+    'gen':                      int,
+    'best_score':               float,   # all-time best (non-decreasing)
+    'avg_score':                float,
+    'F_mean':                   float,   # mean F across population (in [0,1])
+    'CR_mean':                  float,   # mean CR across population (in [0,1])
+    'improved':                 bool,
+    'gens_without_improvement': int,
+    'stop_reason':              str,     # 'patience' or None
+    'pop_size':                 int,     # current population size (changes with L-SHADE)
+}
+```
+
+**Reading F_mean and CR_mean:**
+- `F_mean` converging toward 0.5 = typical healthy run; very low F = tiny steps
+- `CR_mean` near 1.0 = whole-vector crossover (behaves like random walk); near 0 = single-gene
+- Tracking these helps diagnose stagnation vs. natural convergence
+
+### L-SHADE variant
+
+```python
+opt = DEOptimizer(
+    genes, fitness,
+    population_size      = 100,
+    generations          = 200,
+    linear_pop_reduction = True,   # L-SHADE
+)
+```
+
+Population shrinks linearly from `population_size` to 4 over `generations`. Good for
+problems with a fixed evaluation budget — broad early, tight late.
+
+### JSON log
+
+Log type is `"de"`. Config records `strategy`, `memory_size`, `linear_pop_reduction`.
+
+### When to use DEOptimizer vs CMA-ES vs GeneticAlgorithm
+
+| | `DEOptimizer` | `CMAESOptimizer` | `GeneticAlgorithm` |
+|---|---|---|---|
+| Gene types | FloatRange only | FloatRange only | All types |
+| Landscape | Mild-to-moderate multimodality | Smooth, unimodal | Any |
+| Correlation awareness | Partial | Full (covariance matrix) | None |
+| Parameter tuning needed | None (SHADE adapts) | sigma0 | mutation_rate |
+| L-SHADE (pop reduction) | Yes | No | Yes |
+
+---
+
+## MAPElites
+
+`MAPElites` is a **quality-diversity** optimizer. Instead of finding a single best
+solution, it fills a behavioral grid with the best solution found in each niche.
+
+The result is an **archive**: a map from behavior coordinates to the best individual
+in that behavioral region. You get both quality (high scores) and diversity (solutions
+spread across the behavioral space).
+
+### API
+
+```python
+from evogine import MAPElites
+
+me = MAPElites(
+    gene_builder       = genes,
+    fitness_function   = fitness,
+    behavior_fn        = behavior,     # fn(individual) -> tuple[float, ...]
+    grid_shape         = (20, 20),     # one int per behavioral dimension
+    initial_population = 200,          # random seeding phase
+    generations        = 1000,
+    mutation_rate      = 0.1,
+    mode               = 'maximize',
+    seed               = None,
+    log_path           = None,
+    on_generation      = None,         # fn(gen, archive_size, best_score, coverage)
+)
+
+archive, history = me.run()
+```
+
+### `behavior_fn`
+
+Maps an individual to a tuple of behavioral coordinates. Values should ideally be in
+`[0, 1]` — they are discretized into grid cell indices. Out-of-range values are clamped
+to the boundary cells.
+
+```python
+# Example: 2D behavioral space — aggression and diversification
+def behavior(ind):
+    return (
+        ind['position_size'],              # already in [0, 1]
+        1.0 - ind['stop_loss'] / 0.10,    # invert so 1=tight stop, 0=loose stop
+    )
+```
+
+**Good behavioral descriptors:** characteristics that differ meaningfully between
+strategies but are not directly optimized. If behavior correlates perfectly with fitness,
+every cell will have the same type of solution.
+
+### Full parameter reference
+
+| Parameter | Default | Description |
+|---|---|---|
+| `gene_builder` | required | Any gene types |
+| `fitness_function` | required | `dict → float` |
+| `behavior_fn` | required | `dict → tuple[float, ...]`; length must match `grid_shape` |
+| `grid_shape` | required | Tuple of ints; `(20, 20)` = 400 cells, `(10, 10, 10)` = 1000 cells |
+| `initial_population` | `200` | Random individuals used to seed the archive before the main loop |
+| `generations` | `1000` | Main loop generations (after seeding) |
+| `mutation_rate` | `0.1` | Per-gene mutation probability |
+| `mode` | `'maximize'` | `'maximize'` or `'minimize'` |
+| `seed` | `None` | Random seed |
+| `log_path` | `None` | Path for JSON log |
+| `on_generation` | `None` | Callback `fn(gen, archive_size, best_score, coverage)` |
+
+### Return value
+
+```python
+archive, history = me.run()
+
+# archive: dict mapping grid cell → solution
+archive[(3, 7)]
+# → {
+#     'individual': {'x': 0.42, 'y': 0.67},
+#     'score':      1.23,
+#     'behavior':   (0.42, 0.67),
+#   }
+
+# Get overall best
+best = max(archive.values(), key=lambda e: e['score'])
+
+# Query a specific niche (e.g. low-aggression region)
+low_aggression = archive.get((0, 5))  # cell (0, 5) or None if not filled
+```
+
+### Generation history
+
+```python
+{
+    'gen':          int,    # 0 = seeding phase, 1+ = main loop
+    'archive_size': int,    # filled cells so far
+    'best_score':   float,  # all-time best score (non-decreasing)
+    'coverage':     float,  # archive_size / total_cells  (0.0–1.0)
+}
+```
+
+**`coverage`** tells you what fraction of behavioral niches have been discovered.
+A flat coverage curve after many generations means the archive is mostly full — you can
+either stop or shrink the grid.
+
+### Choosing `grid_shape`
+
+| Dimensions | Example | Cells | Initial population needed |
+|---|---|---|---|
+| 1D | `(50,)` | 50 | ~100 |
+| 2D | `(20, 20)` | 400 | ~500 |
+| 2D fine | `(50, 50)` | 2500 | ~3000 |
+| 3D | `(10, 10, 10)` | 1000 | ~1500 |
+
+### JSON log
+
+Log type is `"map_elites"`. Result section includes `archive_size`, `coverage`, `best_score`.
+
+### When to use
+
+- You want a **portfolio of diverse strategies** rather than one best strategy
+- You want to explore trade-offs manually after the run (pick from the archive)
+- Your problem has a meaningful behavioral space (strategies that differ in character
+  even if similar in overall score)
+- Classic use case: trading strategies with different aggression levels, all optimized
+  within their niche
+
+---
+
+## Landscape Analysis
+
+`landscape_analysis()` samples your fitness landscape and recommends which optimizer
+to use. Run it before committing to a long optimization.
+
+```python
+from evogine import landscape_analysis
+
+report = landscape_analysis(
+    gene_builder     = genes,
+    fitness_function = fitness,
+    n_samples        = 500,     # random individuals to evaluate
+    seed             = 42,
+    epsilon          = 0.01,    # neutrality threshold (fraction of fitness range)
+    n_neighbors      = 5,       # neighbors per sample for ruggedness
+)
+```
+
+### Return value
+
+```python
+{
+    'ruggedness':             float,   # 0=smooth, 1=maximally jagged
+    'neutrality':             float,   # fraction of neighbor pairs nearly equal
+    'estimated_modes':        int,     # estimated number of local optima
+    'float_only':             bool,    # True if all genes are FloatRange
+    'recommendation':         str,     # class name to use
+    'reason':                 str,     # plain English explanation
+    'sample_best':            float,   # best fitness found during sampling
+    'sample_best_individual': dict,    # individual with best fitness
+}
+```
+
+### Recommendation logic
+
+| Condition | Recommendation |
+|---|---|
+| `float_only` + `ruggedness < 0.15` + `modes ≤ 2` | `CMAESOptimizer` — smooth unimodal |
+| `float_only` + `ruggedness < 0.4` + `modes ≤ 3` | `DEOptimizer` — mild multimodality |
+| `float_only` + `modes ≥ 4` | `IslandModel` — highly multimodal |
+| Mixed gene types or anything else | `GeneticAlgorithm` — robust default |
+
+### Interpreting the metrics
+
+**Ruggedness:** Average fitness change between nearest-neighbor pairs, normalised by
+fitness range. Near 0 = smooth gradient you can follow; near 1 = noisy, no gradient.
+DE and CMA-ES need low-to-moderate ruggedness.
+
+**Neutrality:** Fraction of neighbor pairs with nearly identical fitness. High neutrality
+means large flat regions — the algorithm spends many evaluations making no progress.
+Restart mechanisms or larger populations help here.
+
+**Estimated modes:** Local maxima count in a 20-bin fitness histogram. Treat it as
+a lower bound; complex landscapes can have more. `≥ 4` suggests IslandModel.
+
+### Auto-dispatch pattern
+
+```python
+from evogine import landscape_analysis, GeneticAlgorithm, DEOptimizer, CMAESOptimizer, IslandModel
+
+report = landscape_analysis(genes, fitness, n_samples=200, seed=1)
+print(f"Recommended: {report['recommendation']} — {report['reason']}")
+
+OPTIMIZERS = {
+    'GeneticAlgorithm': lambda: GeneticAlgorithm(genes, fitness, generations=200, seed=42),
+    'DEOptimizer':      lambda: DEOptimizer(genes, fitness, generations=200, seed=42),
+    'CMAESOptimizer':   lambda: CMAESOptimizer(genes, fitness, generations=200, seed=42),
+    'IslandModel':      lambda: IslandModel(genes, fitness, generations=200, seed=42),
+}
+
+opt = OPTIMIZERS[report['recommendation']]()
+best, score, history = opt.run()
+```
+
+### Limitations
+
+- Based on random sampling, not exhaustive analysis. A landscape can look smooth in
+  samples but have sharp ridges.
+- Mode counting is approximate. Use as a rough guide.
+- Run time scales with `n_samples` and the cost of your fitness function. `n_samples=200`
+  is a cheap quick check; `n_samples=1000` gives a more reliable picture.
+
+---
+
 ## Parameter Tuning Guide
 
 If your run isn't working well, use this checklist.
@@ -1160,7 +1670,7 @@ def test_floatrange_mutate_stays_in_bounds(low, high, sigma, start):
     assert low <= spec.mutate(value, mutation_rate=1.0) <= high
 ```
 
-Hypothesis generates 300 random combinations and runs your assertion on all of them.
+Hypothesis generates hundreds of random combinations and runs your assertion on all of them.
 If any combination fails, it *shrinks* the inputs to the smallest failing example —
 so instead of `low=-847.3, high=0.002, start=999.9`, you get `low=0.0, high=0.1` — much
 easier to debug.
