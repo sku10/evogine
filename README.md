@@ -147,7 +147,7 @@ Individuals are plain Python `dict`s — no special classes, no magic.
 - **Checkpoint / resume** — save state, resume interrupted runs (essential for long backtests)
 
 **Testing**
-- **429 tests** across 10 test files
+- **495 tests** across 11 test files
 - **Property-based tests** via `hypothesis` — invariants verified against hundreds of random inputs
 
 ---
@@ -628,6 +628,34 @@ pytest tests/test_property.py
 
 Invariants verified: gene bounds, mutation rate zero means no change, history keys always
 present, best score never decreases, gen counter sequential, diversity in [0, 1].
+
+---
+
+## Benchmark Suite
+
+Built-in benchmark suite with 24 problems across 4 categories:
+
+```bash
+python -m evogine.benchmarks                    # all categories
+python -m evogine.benchmarks classic            # 13 standard functions (Sphere, Rosenbrock, Rastrigin, Schwefel, ...)
+python -m evogine.benchmarks engineering        # 3 constrained design problems (welded beam, pressure vessel, spring)
+python -m evogine.benchmarks multi_objective    # 6 MO problems (ZDT1-3, ZDT6, DTLZ1-2)
+python -m evogine.benchmarks qd                # 2 quality-diversity problems
+```
+
+Or from code:
+
+```python
+from evogine.benchmarks import run_suite
+results = run_suite(categories=['classic'], eval_budget=5000)
+
+# Use individual functions directly
+from evogine.benchmarks.functions import rastrigin, schwefel
+from evogine.benchmarks.engineering import welded_beam_cost, welded_beam_constraints
+from evogine.benchmarks.multi_objective import zdt1, dtlz2
+```
+
+Results saved to `benchmark_suite_results.json`. Extensible — add a function + register a `Problem`.
 
 ---
 

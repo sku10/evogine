@@ -1914,3 +1914,65 @@ print(f"Best parameters: {best}")
 print(f"Sharpe ratio: {score:.4f}")
 print(f"Generations run: {len(history)}")
 ```
+
+---
+
+## Benchmark Suite
+
+Built-in benchmark suite at `evogine.benchmarks`. 24 problems across 4 categories.
+
+### Categories
+
+| Category | Problems | Optimizers tested | What it shows |
+|---|---|---|---|
+| `classic` | 13 standard functions (Sphere, Rosenbrock, Rastrigin, Ackley, Schwefel, Griewank, Levy, Michalewicz, Styblinski-Tang, Zakharov, Dixon-Price) | GA, CMA-ES, DE, Island | Which optimizer fits which landscape |
+| `engineering` | 3 constrained design problems (Welded Beam, Pressure Vessel, Spring) | GA with constraints | Real-world constrained optimization |
+| `multi_objective` | 6 MO problems (ZDT1/2/3/6, DTLZ1/2) | NSGA-II, NSGA-III | Pareto front quality |
+| `qd` | 2 quality-diversity problems (Sphere QD, Rastrigin QD) | MAP-Elites | Archive coverage |
+
+### Running
+
+```bash
+python -m evogine.benchmarks                    # all
+python -m evogine.benchmarks classic            # one category
+python -m evogine.benchmarks classic engineering  # multiple
+```
+
+### From code
+
+```python
+from evogine.benchmarks import run_suite
+results = run_suite(categories=['classic'], eval_budget=10000, seed=42)
+
+# Access individual functions
+from evogine.benchmarks.functions import sphere, rastrigin, schwefel
+from evogine.benchmarks.engineering import welded_beam_cost, welded_beam_constraints
+from evogine.benchmarks.multi_objective import zdt1, dtlz2
+
+# Problem registry
+from evogine.benchmarks.problems import CLASSIC, ENGINEERING, ALL
+```
+
+### Adding a new benchmark
+
+```python
+# 1. Define the function (list[float] -> float)
+def my_function(x):
+    return sum(xi**4 for xi in x)
+
+# 2. Register it
+from evogine.benchmarks.problems import Problem, CLASSIC
+
+CLASSIC.append(Problem(
+    name="MyFunction 5D",
+    category="classic",
+    dim=5,
+    bounds=[(-5.0, 5.0)] * 5,
+    fn=my_function,
+    known_optimum=0.0,
+    tolerance=0.01,
+    description="Quartic — tests convergence on smooth unimodal",
+))
+```
+
+Results are saved to `benchmark_suite_results.json` with timestamps and all metrics.
