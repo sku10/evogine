@@ -6,6 +6,7 @@ that MAPElites batch_size works correctly, and that the workers parameter resolv
 correctly.
 """
 
+import json
 import multiprocessing as mp
 from unittest.mock import patch
 
@@ -21,7 +22,7 @@ from evogine import (
     GeneBuilder,
     FloatRange,
 )
-from evogine._utils import _resolve_workers
+from evogine._utils import _resolve_workers, _SafeEncoder
 
 
 def _make_genes():
@@ -188,6 +189,35 @@ class TestMAPElitesMultiprocessing:
         )
         assert me.use_multiprocessing is False
         assert me.batch_size == 1
+
+
+class TestSafeEncoder:
+    """Verify _SafeEncoder handles numpy scalars in JSON."""
+
+    def test_numpy_bool(self):
+        np = pytest.importorskip("numpy")
+        data = {"flag": np.bool_(True), "off": np.bool_(False)}
+        result = json.loads(json.dumps(data, cls=_SafeEncoder))
+        assert result == {"flag": True, "off": False}
+        assert isinstance(result["flag"], bool)
+
+    def test_numpy_int64(self):
+        np = pytest.importorskip("numpy")
+        data = {"val": np.int64(42)}
+        result = json.loads(json.dumps(data, cls=_SafeEncoder))
+        assert result == {"val": 42}
+        assert isinstance(result["val"], int)
+
+    def test_numpy_float64(self):
+        np = pytest.importorskip("numpy")
+        data = {"val": np.float64(3.14)}
+        result = json.loads(json.dumps(data, cls=_SafeEncoder))
+        assert abs(result["val"] - 3.14) < 1e-10
+
+    def test_plain_types_unaffected(self):
+        data = {"a": 1, "b": True, "c": "hello", "d": [1, 2]}
+        result = json.loads(json.dumps(data, cls=_SafeEncoder))
+        assert result == data
 
 
 class TestResolveWorkers:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evogine"
-version = "0.1.0"
+version = "0.1.1"
 description = "Genetic algorithm and evolutionary optimization engine with built-in diagnostics and AI-agent steering — GA, CMA-ES, differential evolution, island models, NSGA-II/III, and MAP-Elites."
 readme = "README.md"
 license = { text = "MIT" }

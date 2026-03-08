@@ -1,5 +1,15 @@
+import json
 import multiprocessing as mp
 from typing import Optional
+
+
+class _SafeEncoder(json.JSONEncoder):
+    """JSON encoder that handles numpy scalars."""
+
+    def default(self, obj):
+        if hasattr(obj, 'item'):
+            return obj.item()
+        return super().default(obj)
 
 
 def _seed_all(seed: Optional[int]) -> None:

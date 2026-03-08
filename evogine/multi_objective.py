@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all, _resolve_workers
+from ._utils import _seed_all, _resolve_workers, _SafeEncoder
 from .genes import GeneBuilder
 from .operators import CrossoverStrategy, UniformCrossover
 
@@ -508,5 +508,5 @@ class MultiObjectiveGA:
             'history': history,
         }
         with open(self.log_path, 'w', encoding='utf-8') as f:
-            json.dump(log, f, indent=2)
+            json.dump(log, f, indent=2, cls=_SafeEncoder)
         print(f"[LOG] Written to {self.log_path}")

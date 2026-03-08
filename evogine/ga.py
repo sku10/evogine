@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from ._utils import _seed_all, _resolve_workers
+from ._utils import _seed_all, _resolve_workers, _SafeEncoder
 from .genes import FloatRange, IntRange, ChoiceList, GeneBuilder
 from .operators import SelectionStrategy, CrossoverStrategy, RouletteSelection, UniformCrossover
 
@@ -254,7 +254,7 @@ class GeneticAlgorithm:
         if dir_part:
             os.makedirs(dir_part, exist_ok=True)
         with open(self._checkpoint_path, 'w', encoding='utf-8') as f:
-            json.dump(ckpt, f, indent=2)
+            json.dump(ckpt, f, indent=2, cls=_SafeEncoder)
         print(f"[CHECKPOINT] Saved gen {gen} → {self._checkpoint_path}")
 
     def _load_checkpoint(self, path: str) -> dict:
@@ -514,7 +514,7 @@ class GeneticAlgorithm:
         }
 
         with open(self.log_path, 'w', encoding='utf-8') as f:
-            json.dump(log, f, indent=2)
+            json.dump(log, f, indent=2, cls=_SafeEncoder)
         print(f"[LOG] Written to {self.log_path}")
 
     def _analysis_notes(

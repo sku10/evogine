@@ -147,7 +147,7 @@ Individuals are plain Python `dict`s — no special classes, no magic.
 - **Checkpoint / resume** — save state, resume interrupted runs (essential for long backtests)
 
 **Testing**
-- **425 tests** across 10 test files
+- **429 tests** across 10 test files
 - **Property-based tests** via `hypothesis` — invariants verified against hundreds of random inputs
 
 ---
