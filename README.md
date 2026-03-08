@@ -1,5 +1,8 @@
 # evogine
 
+[![Tests](https://github.com/sku10/evogine/actions/workflows/test.yml/badge.svg)](https://github.com/sku10/evogine/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/evogine)](https://pypi.org/project/evogine/)
+
 **Genetic algorithm and evolutionary optimization engine with built-in diagnostics, structured logs, and mid-run steering — designed for AI agents to read, reason about, and control autonomously.**
 
 GA, CMA-ES, differential evolution, island models, NSGA-II/III, MAP-Elites. Six optimizers, zero required dependencies. Every run fully reproducible and machine-interpretable.
